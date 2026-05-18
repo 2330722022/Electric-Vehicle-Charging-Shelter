@@ -78,14 +78,29 @@
 #define SENSOR_ADC_INTERVAL      5000
 #define SENSOR_DATA_EVT          0x0004
 
+// MQ-2 Configuration
+#define MQ2_ADC_CHANNEL          HAL_ADC_CHANNEL_5
+#define MQ2_ADC_RESOLUTION       HAL_ADC_RESOLUTION_12
+
+// Flame Sensor Configuration
+#define FLAME_ADC_CHANNEL        HAL_ADC_CHANNEL_6
+#define FLAME_ADC_RESOLUTION     HAL_ADC_RESOLUTION_12
+
 // PMS7003 Configuration
 #define PMS7003_HEADER           0x42
 #define PMS7003_HEADER_SECOND    0x4D
 #define PMS7003_FRAME_LENGTH     32
 
+// ===== TERMINAL SENSOR CONFIG (toggle before burning) =====
+//#define TERMINAL_PMS7003_ONLY    // Uncomment: PMS7003+ADC0 only (no MQ2/Flame)
+                                     // Comment out: all sensors (PMS7003+ADC0+MQ2+Flame)
+
 // Sensor Data Format
 #define SENSOR_TYPE_PMS7003      0x01
 #define SENSOR_TYPE_ADC          0x02
+#define SENSOR_TYPE_MQ2          0x03
+#define SENSOR_TYPE_FLAME        0x04
+#define SENSOR_TYPE_COMBINED     0x05
 
 // This list should be filled with Application specific Cluster IDs.
 const cId_t SerialApp_ClusterList[SERIALAPP_MAX_CLUSTERS] =
@@ -155,9 +170,19 @@ static uint8 pms7003Buffer[64];
 static uint8 pms7003Index = 0;
 static uint8 pms7003State = 0;
 static uint16 lastAdcValue = 0;
+static uint16 mq2Value = 0;
+static uint16 flameValue = 0;
 static uint8 sensorDataBuffer[32];
 
 // UART Variables
+// Coordinator: Cached sensor values for unified output
+static uint16 coAdc0Value = 0;
+static uint16 coPm1Value = 0;
+static uint16 coPm25Value = 0;
+static uint16 coPm10Value = 0;
+static uint16 coMq2Value = 0;
+static uint16 coFlameValue = 0;
+
 static uint8 uartTxInProgress = FALSE;
 
 // Ring buffer for UART reception
@@ -226,16 +251,25 @@ void SerialApp_Init( uint8 task_id )
   HalLcdInit();
   HalLcdWriteString( "SerialApp", HAL_LCD_LINE_2 );
   HalLcdWriteString( "Initializing...", HAL_LCD_LINE_3 );
+  
+  // Keep LCD on by writing initial sensor data
+  char initBuffer1[17] = "PM2.5:--";
+  char initBuffer2[17] = "PM10:--";
+  HalLcdWriteScreen(initBuffer1, initBuffer2);
 #endif
   
   ZDO_RegisterForZDOMsg( SerialApp_TaskID, End_Device_Bind_rsp );
   ZDO_RegisterForZDOMsg( SerialApp_TaskID, Match_Desc_rsp );
   
-  // Start UART processing timer (10ms)
-  osal_start_timerEx(SerialApp_TaskID, SERIALAPP_PROCESS_EVT, 10);
+  // Start UART processing timer (1000ms)
+  osal_start_timerEx(SerialApp_TaskID, SERIALAPP_PROCESS_EVT, 1000);
   
   // Debug: Initialization complete
-  (void)SerialApp_SafeUARTWrite(0, (uint8*)"[INIT] SerialApp initialized, UART ready\r\n", 37);
+  (void)SerialApp_SafeUARTWrite(0, (uint8*)"[INIT] SerialApp started, waiting for network...\r\n", 47);
+  
+#if defined ( LCD_SUPPORTED )
+  (void)SerialApp_SafeUARTWrite(0, (uint8*)"[INIT] LCD initialized and displaying\r\n", 38);
+#endif
   
   osal_start_timerEx( SerialApp_TaskID, SENSOR_DATA_EVT, SENSOR_ADC_INTERVAL );
 }
@@ -268,25 +302,31 @@ UINT16 SerialApp_ProcessEvent( uint8 task_id, UINT16 events )
         
       case ZDO_STATE_CHANGE:
         SampleApp_NwkState = (devStates_t)(MSGpkt->hdr.status);
+        
         if ( (SampleApp_NwkState == DEV_ZB_COORD)
             || (SampleApp_NwkState == DEV_ROUTER)
             || (SampleApp_NwkState == DEV_END_DEVICE) )
         {
-            // Start sending the periodic message in a regular interval.
             HalLedSet(HAL_LED_1, HAL_LED_MODE_ON);
             
-            // Send device type identification message
-            char deviceBuffer[64];
-            const char *deviceType = (SampleApp_NwkState == DEV_ZB_COORD) ? "[COORD]" : "[END]";
-            sprintf(deviceBuffer, "%s Network connected\r\n", deviceType);
-            (void)SerialApp_SafeUARTWrite(0, (uint8*)deviceBuffer, strlen(deviceBuffer));
+            if (SampleApp_NwkState == DEV_ZB_COORD)
+            {
+              (void)SerialApp_SafeUARTWrite(0, (uint8*)"[COORD] Network established\r\n", 30);
+            }
+            else
+            {
+              uint16 selfAddr = NLME_GetShortAddr();
+              char deviceBuffer[40];
+              sprintf(deviceBuffer, "[END0x%04X] Network established\r\n", selfAddr);
+              (void)SerialApp_SafeUARTWrite(0, (uint8*)deviceBuffer, strlen(deviceBuffer));
+            }
             
             if(SampleApp_NwkState != DEV_ZB_COORD)
               SerialApp_DeviceConnect();              
         }
         else
         {
-          // Device is no longer in the network
+          HalLedSet(HAL_LED_1, HAL_LED_MODE_OFF);
         }
         break;
 
@@ -322,7 +362,7 @@ UINT16 SerialApp_ProcessEvent( uint8 task_id, UINT16 events )
   {
     SerialApp_ProcessUARTBuffer();
     // Restart timer for next processing
-    osal_start_timerEx(SerialApp_TaskID, SERIALAPP_PROCESS_EVT, 10);
+    osal_start_timerEx(SerialApp_TaskID, SERIALAPP_PROCESS_EVT, 1000);
     return ( events ^ SERIALAPP_PROCESS_EVT );
   }
 
@@ -350,31 +390,119 @@ void SerialApp_ProcessMSGCmd( afIncomingMSGPacket_t *pkt )
   switch ( pkt->clusterId )
   {
   // A message with a serial data block to be transmitted on the serial port.
-  case SERIALAPP_CLUSTERID1: //�յ����͹���������ͨ�����������������ʾ
+  case SERIALAPP_CLUSTERID1:
     // Store the address for sending and retrying.
     osal_memcpy(&SerialApp_RxAddr, &(pkt->srcAddr), sizeof( afAddrType_t ));
 
-    seqnb = pkt->cmd.Data[0];
-
-    // Keep message if not a repeat packet
-    if ( (seqnb > SerialApp_RxSeq) ||                    // Normal
-        ((seqnb < 0x80 ) && ( SerialApp_RxSeq > 0x80)) ) // Wrap-around
+    // Check if this is PMS7003 binary data (1 byte type + 32 bytes raw frame)
+    if (pkt->cmd.DataLength == 33 && pkt->cmd.Data[0] == SENSOR_TYPE_PMS7003)
     {
-        // Transmit the data on the serial port. // ͨ�����ڷ������ݵ�PC��
-        if ( SerialApp_SafeUARTWrite( SERIAL_APP_PORT, pkt->cmd.Data+1, (pkt->cmd.DataLength-1) ) )
+      // This is PMS7003 binary data - parse it properly
+      uint8 *pmsData = &pkt->cmd.Data[1]; // Skip type byte
+      uint16 srcAddr = pkt->srcAddr.addr.shortAddr;
+      
+      // Verify PMS7003 header
+      if (pmsData[0] == 0x42 && pmsData[1] == 0x4D)
+      {
+        // Calculate checksum (sum of first 30 bytes)
+        uint16 calcChecksum = 0;
+        for (uint8 i = 0; i < 30; i++)
         {
-          // Save for next incoming message
-          SerialApp_RxSeq = seqnb;
-          stat = OTA_SUCCESS;
+          calcChecksum += pmsData[i];
         }
-        else
+        
+        // Get received checksum (bytes 30 and 31) - PMS7003 uses little-endian for checksum!
+        uint16 recvChecksum = ((uint16)pmsData[30] << 8) | pmsData[31];
+        
+        if (calcChecksum == recvChecksum)
         {
-          stat = OTA_SER_BUSY;
+          // Valid PMS7003 frame - parse PM values
+          coPm1Value = ((uint16)pmsData[4] << 8) | pmsData[5];
+          coPm25Value = ((uint16)pmsData[6] << 8) | pmsData[7];
+          coPm10Value = ((uint16)pmsData[8] << 8) | pmsData[9];
+          
+          // Print PMS7003 data from terminal with source address
+          {
+            char pmsBuffer[80];
+            sprintf(pmsBuffer, "[COORD] RX [END0x%04X] PMS7003: PM1.0=%d PM2.5=%d PM10=%d\r\n", 
+                    srcAddr, coPm1Value, coPm25Value, coPm10Value);
+            (void)SerialApp_SafeUARTWrite(SERIAL_APP_PORT, (uint8*)pmsBuffer, strlen(pmsBuffer));
+          }
         }
+      }
+    }
+    // Check if this is combined sensor data (ADC0+MQ2+Flame in one message)
+    else if (pkt->cmd.DataLength == 8 && pkt->cmd.Data[1] == SENSOR_TYPE_COMBINED)
+    {
+      uint16 srcAddr = pkt->srcAddr.addr.shortAddr;
+      
+      // Parse all values from combined message
+      coAdc0Value = BUILD_UINT16(pkt->cmd.Data[2], pkt->cmd.Data[3]);
+      coMq2Value = BUILD_UINT16(pkt->cmd.Data[4], pkt->cmd.Data[5]);
+      coFlameValue = BUILD_UINT16(pkt->cmd.Data[6], pkt->cmd.Data[7]);
+      
+      // Print combined RX message
+      {
+        char combRxBuf[80];
+        sprintf(combRxBuf, "[COORD] RX [END0x%04X] ADC0=%d MQ2=%d Flame=%d\r\n", 
+                srcAddr, coAdc0Value, coMq2Value, coFlameValue);
+        (void)SerialApp_SafeUARTWrite(SERIAL_APP_PORT, (uint8*)combRxBuf, strlen(combRxBuf));
+      }
+      
+      // Print combined data line
+      {
+        char combBuf[60];
+        sprintf(combBuf, "[END0x%04X] %u,%u,%u,%u,%u\r\n", 
+                srcAddr, coPm1Value, coPm25Value, coPm10Value, coMq2Value, coFlameValue);
+        (void)SerialApp_SafeUARTWrite(SERIAL_APP_PORT, (uint8*)combBuf, strlen(combBuf));
+      }
+    }
+    // Check if this is individual sensor data (legacy support)
+    else if (pkt->cmd.DataLength == 4 && 
+             (pkt->cmd.Data[1] == SENSOR_TYPE_ADC || pkt->cmd.Data[1] == SENSOR_TYPE_MQ2 || pkt->cmd.Data[1] == SENSOR_TYPE_FLAME))
+    {
+      uint8 sensorType = pkt->cmd.Data[1];
+      uint16 value = BUILD_UINT16(pkt->cmd.Data[2], pkt->cmd.Data[3]);
+      uint16 srcAddr = pkt->srcAddr.addr.shortAddr;
+      
+      if (sensorType == SENSOR_TYPE_MQ2)
+      {
+        coMq2Value = value;
+      }
+      else if (sensorType == SENSOR_TYPE_FLAME)
+      {
+        coFlameValue = value;
+      }
+      else if (sensorType == SENSOR_TYPE_ADC)
+      {
+        coAdc0Value = value;
+      }
     }
     else
     {
-        stat = OTA_DUP_MSG;
+      // Normal serial data handling (text-based)
+      seqnb = pkt->cmd.Data[0];
+
+      // Keep message if not a repeat packet
+      if ( (seqnb > SerialApp_RxSeq) ||                    // Normal
+          ((seqnb < 0x80 ) && ( SerialApp_RxSeq > 0x80)) ) // Wrap-around
+      {
+          // Transmit the data on the serial port.
+          if ( SerialApp_SafeUARTWrite( SERIAL_APP_PORT, pkt->cmd.Data+1, (pkt->cmd.DataLength-1) ) )
+          {
+            // Save for next incoming message
+            SerialApp_RxSeq = seqnb;
+            stat = OTA_SUCCESS;
+          }
+          else
+          {
+            stat = OTA_SER_BUSY;
+          }
+      }
+      else
+      {
+          stat = OTA_DUP_MSG;
+      }
     }
 
     // Select approproiate OTA flow-control delay.
@@ -385,7 +513,7 @@ void SerialApp_ProcessMSGCmd( afIncomingMSGPacket_t *pkt )
     SerialApp_RspBuf[1] = seqnb;
     SerialApp_RspBuf[2] = LO_UINT16( delay );
     SerialApp_RspBuf[3] = HI_UINT16( delay );
-    osal_set_event( SerialApp_TaskID, SERIALAPP_RESP_EVT ); //�յ����ݺ󣬷���һ����Ӧ�¼�
+    osal_set_event( SerialApp_TaskID, SERIALAPP_RESP_EVT );
     osal_stop_timerEx(SerialApp_TaskID, SERIALAPP_RESP_EVT);
     break;
 
@@ -510,18 +638,14 @@ static void SerialApp_CallBack(uint8 port, uint8 event)
     
     if (len > 0)
     {
-      // Add data to ring buffer, filtering out noise bytes
+      // Add data to ring buffer - PMS7003 uses binary protocol, don't filter any bytes
       for (uint16 i = 0; i < len; i++)
       {
-        // Filter out noise bytes: 0x02 (STX), 0x3F (?), 0x00 (NULL)
-        if (data[i] != 0x02 && data[i] != 0x3F && data[i] != 0x00)
+        uint16 nextHead = (uartRingBufferHead + 1) % UART_RING_BUFFER_SIZE;
+        if (nextHead != uartRingBufferTail)
         {
-          uint16 nextHead = (uartRingBufferHead + 1) % UART_RING_BUFFER_SIZE;
-          if (nextHead != uartRingBufferTail)
-          {
-            uartRingBuffer[uartRingBufferHead] = data[i];
-            uartRingBufferHead = nextHead;
-          }
+          uartRingBuffer[uartRingBufferHead] = data[i];
+          uartRingBufferHead = nextHead;
         }
       }
     }
@@ -538,13 +662,13 @@ void  SerialApp_DeviceConnect()
   
   uint16 nwkAddr;
   uint16 parentNwkAddr;
-  char buff[30] = {0};
+  char buff[40] = {0};
   
   HalLedBlink( HAL_LED_2, 3, 50, (1000 / 4) );
   
   nwkAddr = NLME_GetShortAddr();
   parentNwkAddr = NLME_GetCoordShortAddr();
-  sprintf(buff, "parent:%d   self:%d\r\n", parentNwkAddr, nwkAddr);
+  sprintf(buff, "[END0x%04X] Connected, parent:0x%04X\r\n", nwkAddr, parentNwkAddr);
   HalUARTWrite ( 0, (uint8*)buff, strlen(buff));
   
   SerialApp_TxAddr.addrMode = (afAddrMode_t)Addr16Bit;
@@ -576,26 +700,33 @@ void SerialApp_DeviceConnectRsp(uint8 *buf)
 #if ZDO_COORDINATOR
   
 #else
+  uint16 selfAddr = NLME_GetShortAddr();
   SerialApp_TxAddr.addrMode = (afAddrMode_t)Addr16Bit;
   SerialApp_TxAddr.endPoint = SERIALAPP_ENDPOINT;
   SerialApp_TxAddr.addr.shortAddr = BUILD_UINT16(buf[1], buf[0]);
   
   HalLedSet(HAL_LED_2, HAL_LED_MODE_ON);
-  (void)SerialApp_SafeUARTWrite(0, (uint8*)"< connect success>\n", 23);
+  {
+    char connBuf[40];
+    sprintf(connBuf, "[END0x%04X] Connect confirm success\r\n", selfAddr);
+    (void)SerialApp_SafeUARTWrite(0, (uint8*)connBuf, strlen(connBuf));
+  }
 #endif
 }
 
 void SerialApp_ConnectReqProcess(uint8 *buf)
 {
   uint16 nwkAddr;
-  char buff[30] = {0};
+  uint16 childAddr;
+  char buff[40] = {0};
   
   SerialApp_TxAddr.addrMode = (afAddrMode_t)Addr16Bit;
   SerialApp_TxAddr.endPoint = SERIALAPP_ENDPOINT;
-  SerialApp_TxAddr.addr.shortAddr = BUILD_UINT16(buf[1], buf[0]);
+  childAddr = BUILD_UINT16(buf[1], buf[0]);
+  SerialApp_TxAddr.addr.shortAddr = childAddr;
   nwkAddr = NLME_GetShortAddr();
   
-  sprintf(buff, "self:%d   child:%d\r\n", nwkAddr, SerialApp_TxAddr.addr.shortAddr);
+  sprintf(buff, "[COORD] END[0x%04X] connect request\r\n", childAddr);
   (void)SerialApp_SafeUARTWrite(0, (uint8*)buff, strlen(buff));
   
   buff[0] = HI_UINT16( nwkAddr );
@@ -616,42 +747,77 @@ void SerialApp_ConnectReqProcess(uint8 *buf)
   }
   
   HalLedSet(HAL_LED_2, HAL_LED_MODE_ON);
-  (void)SerialApp_SafeUARTWrite(0, (uint8*)"< connect success>\n", 23);
+  {
+    char succBuf[40];
+    sprintf(succBuf, "[COORD] END[0x%04X] connect success\r\n", childAddr);
+    (void)SerialApp_SafeUARTWrite(0, (uint8*)succBuf, strlen(succBuf));
+  }
 }
 
 static void SerialApp_ReadADCSensor(void)
 {
   lastAdcValue = HalAdcRead(SENSOR_ADC_CHANNEL, SENSOR_ADC_RESOLUTION);
   
-  float voltage = (lastAdcValue * 3.3) / 4095.0;
+  char buffer[80];
+  uint8 isCoordinator = (SampleApp_NwkState == DEV_ZB_COORD);
   
-  char buffer[64];
-  if (SampleApp_NwkState == DEV_ZB_COORD || 
-      SampleApp_NwkState == DEV_ROUTER || 
-      SampleApp_NwkState == DEV_END_DEVICE)
+  if (isCoordinator)
   {
-    const char *deviceType = (SampleApp_NwkState == DEV_ZB_COORD) ? "[COORD]" : "[END]";
-    sprintf(buffer, "%s ADC: Value=%d Voltage=%.2fV\r\n", deviceType, lastAdcValue, voltage);
+    // Coordinator only reads ADC0, MQ2/Flame are on end device
+    float voltage = (lastAdcValue * 3.3) / 4095.0;
+    sprintf(buffer, "[COORD] ADC: ADC0=%d(%.2fV)\r\n", lastAdcValue, voltage);
+    (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
   }
   else
   {
-    sprintf(buffer, "[INIT] ADC: Value=%d Voltage=%.2fV\r\n", lastAdcValue, voltage);
-  }
-  (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
-  
+    uint16 selfAddr = NLME_GetShortAddr();
+    
+#ifdef TERMINAL_PMS7003_ONLY
+    // PMS7003-only: only ADC0 available
+    float voltage = (lastAdcValue * 3.3) / 4095.0;
+    sprintf(buffer, "[END0x%04X] ADC: ADC0=%d(%.2fV)\r\n", 
+            selfAddr, lastAdcValue, voltage);
+    (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
+    
+    // Send ADC0 only
+    sensorDataBuffer[0] = SENSOR_TYPE_ADC;
+    sensorDataBuffer[1] = LO_UINT16(lastAdcValue);
+    sensorDataBuffer[2] = HI_UINT16(lastAdcValue);
+    SerialApp_SendSensorData(SENSOR_TYPE_ADC, sensorDataBuffer, 3);
+#else
+    // Full sensors: read MQ2 + Flame
+    mq2Value = HalAdcRead(MQ2_ADC_CHANNEL, MQ2_ADC_RESOLUTION);
+    flameValue = HalAdcRead(FLAME_ADC_CHANNEL, FLAME_ADC_RESOLUTION);
+    
+    float voltage = (lastAdcValue * 3.3) / 4095.0;
+    float mq2Voltage = (mq2Value * 3.3) / 4095.0;
+    float flameVoltage = (flameValue * 3.3) / 4095.0;
+    
+    sprintf(buffer, "[END0x%04X] ADC: ADC0=%d(%.2fV) MQ2=%d(%.2fV) Flame=%d(%.2fV)\r\n", 
+            selfAddr, lastAdcValue, voltage, mq2Value, mq2Voltage, flameValue, flameVoltage);
+    (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
+    
 #if defined ( LCD_SUPPORTED )
-  char lcdBuffer1[17];
-  char lcdBuffer2[17];
-  sprintf(lcdBuffer1, "ADC:%d", lastAdcValue);
-  sprintf(lcdBuffer2, "%.2fV", voltage);
-  HalLcdWriteScreen(lcdBuffer1, lcdBuffer2);
+    {
+      char lcdBuffer1[17];
+      char lcdBuffer2[17];
+      sprintf(lcdBuffer1, "MQ2:%d", mq2Value);
+      sprintf(lcdBuffer2, "Flame:%d", flameValue);
+      HalLcdWriteScreen(lcdBuffer1, lcdBuffer2);
+    }
 #endif
-  
-  sensorDataBuffer[0] = SENSOR_TYPE_ADC;
-  sensorDataBuffer[1] = LO_UINT16(lastAdcValue);
-  sensorDataBuffer[2] = HI_UINT16(lastAdcValue);
-  
-  SerialApp_SendSensorData(SENSOR_TYPE_ADC, sensorDataBuffer, 3);
+    
+    // Send combined sensor data (ADC0+MQ2+Flame) in one message
+    sensorDataBuffer[0] = SENSOR_TYPE_COMBINED;
+    sensorDataBuffer[1] = LO_UINT16(lastAdcValue);
+    sensorDataBuffer[2] = HI_UINT16(lastAdcValue);
+    sensorDataBuffer[3] = LO_UINT16(mq2Value);
+    sensorDataBuffer[4] = HI_UINT16(mq2Value);
+    sensorDataBuffer[5] = LO_UINT16(flameValue);
+    sensorDataBuffer[6] = HI_UINT16(flameValue);
+    SerialApp_SendSensorData(SENSOR_TYPE_COMBINED, sensorDataBuffer, 7);
+#endif
+  }
 }
 
 static void SerialApp_SendSensorData(uint8 sensorType, uint8 *data, uint8 len)
@@ -660,23 +826,39 @@ static void SerialApp_SendSensorData(uint8 sensorType, uint8 *data, uint8 len)
       SampleApp_NwkState == DEV_ROUTER || 
       SampleApp_NwkState == DEV_END_DEVICE)
   {
-    uint8 sendBuf[SERIAL_APP_TX_MAX];
-    uint8 sendLen = len;
-    
-    if (sendLen > (SERIAL_APP_TX_MAX - 1))
+    // For PMS7003, send the complete 32-byte raw frame with type prefix
+    if (sensorType == SENSOR_TYPE_PMS7003)
     {
-      sendLen = SERIAL_APP_TX_MAX - 1;
+      uint8 sendBuf[33]; // 1 byte type + 32 bytes raw frame
+      sendBuf[0] = sensorType;
+      osal_memcpy(&sendBuf[1], data, 32);
+      
+      // Send with fixed length of 33 bytes - critical for binary data!
+      AF_DataRequest(&SerialApp_TxAddr,
+                     (endPointDesc_t *)&SerialApp_epDesc,
+                     SERIALAPP_CLUSTERID1,
+                     33, sendBuf,
+                     &SerialApp_MsgID, 0, AF_DEFAULT_RADIUS);
     }
-    
-    sendBuf[0] = ++SerialApp_TxSeq;
-    osal_memcpy(sendBuf + 1, data, sendLen);
-    
-    if (afStatus_SUCCESS != AF_DataRequest(&SerialApp_TxAddr,
-                                           (endPointDesc_t *)&SerialApp_epDesc,
-                                            SERIALAPP_CLUSTERID1,
-                                            sendLen + 1, sendBuf,
-                                            &SerialApp_MsgID, 0, AF_DEFAULT_RADIUS))
+    else
     {
+      // For other sensors or normal data
+      uint8 sendBuf[SERIAL_APP_TX_MAX];
+      uint8 sendLen = len;
+      
+      if (sendLen > (SERIAL_APP_TX_MAX - 1))
+      {
+        sendLen = SERIAL_APP_TX_MAX - 1;
+      }
+      
+      sendBuf[0] = ++SerialApp_TxSeq;
+      osal_memcpy(sendBuf + 1, data, sendLen);
+      
+      AF_DataRequest(&SerialApp_TxAddr,
+                     (endPointDesc_t *)&SerialApp_epDesc,
+                     SERIALAPP_CLUSTERID1,
+                     sendLen + 1, sendBuf,
+                     &SerialApp_MsgID, 0, AF_DEFAULT_RADIUS);
     }
   }
 }
@@ -723,46 +905,9 @@ static uint8 SerialApp_SafeUARTWrite(uint8 port, const uint8 *data, uint16 len)
 // Process UART buffer from ring buffer
 static void SerialApp_ProcessUARTBuffer(void)
 {
-  // Process PMS7003 data
+  // Process PMS7003 data only - do NOT forward remaining bytes as regular serial data
+  // to avoid flooding the coordinator with binary garbage
   SerialApp_ProcessPMS7003Data();
-  
-  // Process regular serial data if network is connected
-  if (SampleApp_NwkState == DEV_ZB_COORD || 
-      SampleApp_NwkState == DEV_ROUTER || 
-      SampleApp_NwkState == DEV_END_DEVICE)
-  {
-    // Check if there's data in the ring buffer for regular processing
-    uint16 available = (uartRingBufferHead - uartRingBufferTail + UART_RING_BUFFER_SIZE) % UART_RING_BUFFER_SIZE;
-    
-    if (available > 0 && !SerialApp_TxLen)
-    {
-      uint16 readLen = available;
-      if (readLen > SERIAL_APP_TX_MAX)
-      {
-        readLen = SERIAL_APP_TX_MAX;
-      }
-      
-      // Copy data from ring buffer to transmit buffer
-      for (uint16 i = 0; i < readLen; i++)
-      {
-        SerialApp_TxBuf[i+1] = uartRingBuffer[uartRingBufferTail];
-        uartRingBufferTail = (uartRingBufferTail + 1) % UART_RING_BUFFER_SIZE;
-      }
-      
-      SerialApp_TxLen = readLen;
-      SerialApp_TxBuf[0] = ++SerialApp_TxSeq;
-      
-      // Send data over Zigbee
-      if (afStatus_SUCCESS != AF_DataRequest(&SerialApp_TxAddr,
-                                             (endPointDesc_t *)&SerialApp_epDesc,
-                                              SERIALAPP_CLUSTERID1,
-                                              SerialApp_TxLen+1, SerialApp_TxBuf,
-                                              &SerialApp_MsgID, 0, AF_DEFAULT_RADIUS))
-      {
-        osal_set_event(SerialApp_TaskID, SERIALAPP_SEND_EVT);
-      }
-    }
-  }
 }
 
 // Process PMS7003 data from ring buffer
@@ -819,6 +964,20 @@ static void SerialApp_ProcessPMS7003Data(void)
         break;
         
       case 2: // Receiving data
+        // Check if we got a new frame header (frame synchronization)
+        if (data == PMS7003_HEADER && pms7003Index < 32)
+        {
+          // New frame starting, reset and start new frame
+          pms7003State = 1;
+          pms7003Buffer[0] = data;
+          pms7003Index = 1;
+          
+          // Move to next byte
+          uartRingBufferTail = (uartRingBufferTail + 1) % UART_RING_BUFFER_SIZE;
+          available = (uartRingBufferHead - uartRingBufferTail + UART_RING_BUFFER_SIZE) % UART_RING_BUFFER_SIZE;
+          break;
+        }
+        
         pms7003Buffer[pms7003Index++] = data;
         
         // Move to next byte
@@ -828,29 +987,6 @@ static void SerialApp_ProcessPMS7003Data(void)
         // Check if we have complete 32-byte frame
         if (pms7003Index >= 32)
         {
-          // Debug: Print raw data for troubleshooting
-          char rawBuffer[64];
-          if (SampleApp_NwkState == DEV_ZB_COORD || 
-              SampleApp_NwkState == DEV_ROUTER || 
-              SampleApp_NwkState == DEV_END_DEVICE)
-          {
-            const char *deviceType = (SampleApp_NwkState == DEV_ZB_COORD) ? "[COORD]" : "[END]";
-            sprintf(rawBuffer, "%s PMS7003 Raw: ", deviceType);
-          }
-          else
-          {
-            sprintf(rawBuffer, "[INIT] PMS7003 Raw: ");
-          }
-          
-          for (uint8 j = 0; j < 32; j++)
-          {
-            char hex[4];
-            sprintf(hex, "%02X ", pms7003Buffer[j]);
-            strcat(rawBuffer, hex);
-          }
-          strcat(rawBuffer, "\r\n");
-          (void)SerialApp_SafeUARTWrite(0, (uint8*)rawBuffer, strlen(rawBuffer));
-          
           // Calculate checksum (sum of first 30 bytes)
           uint16 calcChecksum = 0;
           for (uint8 j = 0; j < 30; j++)
@@ -858,7 +994,7 @@ static void SerialApp_ProcessPMS7003Data(void)
             calcChecksum += pms7003Buffer[j];
           }
           
-          // Get received checksum
+          // Get received checksum (bytes 30 and 31)
           uint16 recvChecksum = BUILD_UINT16(pms7003Buffer[31], pms7003Buffer[30]);
           
           if (calcChecksum == recvChecksum)
@@ -868,20 +1004,15 @@ static void SerialApp_ProcessPMS7003Data(void)
             uint16 pm2_5 = BUILD_UINT16(pms7003Buffer[7], pms7003Buffer[6]);
             uint16 pm10_0 = BUILD_UINT16(pms7003Buffer[9], pms7003Buffer[8]);
             
-            // Debug output
-            char buffer[64];
-            if (SampleApp_NwkState == DEV_ZB_COORD || 
-                SampleApp_NwkState == DEV_ROUTER || 
-                SampleApp_NwkState == DEV_END_DEVICE)
+            // Print PMS7003 data locally with device identifier
+            if (SampleApp_NwkState != DEV_ZB_COORD)
             {
-              const char *deviceType = (SampleApp_NwkState == DEV_ZB_COORD) ? "[COORD]" : "[END]";
-              sprintf(buffer, "%s PMS7003: PM1.0=%d PM2.5=%d PM10=%d\r\n", deviceType, pm1_0, pm2_5, pm10_0);
+              uint16 selfAddr = NLME_GetShortAddr();
+              char pmsBuffer[80];
+              sprintf(pmsBuffer, "[END0x%04X] PMS7003: PM1.0=%d PM2.5=%d PM10=%d\r\n", 
+                      selfAddr, pm1_0, pm2_5, pm10_0);
+              (void)SerialApp_SafeUARTWrite(0, (uint8*)pmsBuffer, strlen(pmsBuffer));
             }
-            else
-            {
-              sprintf(buffer, "[INIT] PMS7003: PM1.0=%d PM2.5=%d PM10=%d\r\n", pm1_0, pm2_5, pm10_0);
-            }
-            (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
             
 #if defined ( LCD_SUPPORTED )
             char lcdBuffer1[17];
@@ -891,33 +1022,8 @@ static void SerialApp_ProcessPMS7003Data(void)
             HalLcdWriteScreen(lcdBuffer1, lcdBuffer2);
 #endif
             
-            // Prepare data for Zigbee transmission
-            sensorDataBuffer[0] = SENSOR_TYPE_PMS7003;
-            sensorDataBuffer[1] = LO_UINT16(pm1_0);
-            sensorDataBuffer[2] = HI_UINT16(pm1_0);
-            sensorDataBuffer[3] = LO_UINT16(pm2_5);
-            sensorDataBuffer[4] = HI_UINT16(pm2_5);
-            sensorDataBuffer[5] = LO_UINT16(pm10_0);
-            sensorDataBuffer[6] = HI_UINT16(pm10_0);
-            
-            SerialApp_SendSensorData(SENSOR_TYPE_PMS7003, sensorDataBuffer, 7);
-          }
-          else
-          {
-            // Checksum error - only print one line, don't clear screen
-            char buffer[32];
-            if (SampleApp_NwkState == DEV_ZB_COORD || 
-                SampleApp_NwkState == DEV_ROUTER || 
-                SampleApp_NwkState == DEV_END_DEVICE)
-            {
-              const char *deviceType = (SampleApp_NwkState == DEV_ZB_COORD) ? "[COORD]" : "[END]";
-              sprintf(buffer, "%s PMS7003: Checksum error\r\n", deviceType);
-            }
-            else
-            {
-              sprintf(buffer, "[INIT] PMS7003: Checksum error\r\n");
-            }
-            (void)SerialApp_SafeUARTWrite(0, (uint8*)buffer, strlen(buffer));
+            // Send complete 32-byte raw PMS7003 frame via Zigbee
+            SerialApp_SendSensorData(SENSOR_TYPE_PMS7003, pms7003Buffer, 32);
           }
           
           // Reset for next frame

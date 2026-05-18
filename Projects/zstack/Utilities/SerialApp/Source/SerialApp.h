@@ -87,11 +87,21 @@ extern "C"
 // Sensor Types
 #define SENSOR_TYPE_PMS7003          0x01
 #define SENSOR_TYPE_ADC              0x02
+#define SENSOR_TYPE_MQ2              0x03
+#define SENSOR_TYPE_FLAME            0x04
 
 // Sensor Configuration
 #define SENSOR_ADC_CHANNEL           HAL_ADC_CHANNEL_0
 #define SENSOR_ADC_RESOLUTION        HAL_ADC_RESOLUTION_12
 #define SENSOR_ADC_INTERVAL          5000
+
+// MQ-2 Configuration
+#define MQ2_ADC_CHANNEL              HAL_ADC_CHANNEL_5
+#define MQ2_ADC_RESOLUTION           HAL_ADC_RESOLUTION_12
+
+// Flame Sensor Configuration
+#define FLAME_ADC_CHANNEL            HAL_ADC_CHANNEL_6
+#define FLAME_ADC_RESOLUTION         HAL_ADC_RESOLUTION_12
 
 // PMS7003 Configuration
 #define PMS7003_HEADER               0x42
