@@ -15,9 +15,9 @@
 #include <unistd.h>
 
 /*
- * 模块：网络通信 (app_net.c)
- * 版本：v2.0 稳定版
- * 日期：2026-05-13
+ * 模块：网络通信 (app_net.c) — 电动车充电棚环境监测
+ * 版本：v2.0 充电棚专版
+ * 日期：2026-05-19
  * OS 概念体现：
  *   1. 信号量 (Semaphore) — net_ready_sem 实现线程间同步。
  *      WiFi 连接线程（生产者）获取 IP 后释放信号量，HTTP Server 和 OneNET
@@ -168,14 +168,8 @@ static void http_handler_thread(void *parameter)
             if (strcmp(type_buf, "threshold") == 0)
             {
                 float new_threshold = atof(val_buf);
-                if (new_threshold >= 20.0f && new_threshold <= 50.0f)
+                if (new_threshold >= 20.0f && new_threshold <= 80.0f)
                 {
-                    /*
-                     * 临界区保护：修改 g_app_state.temp_threshold 时持有 data_lock，
-                     * 确保与按键事件处理互斥，防止数据竞争。
-                     * 例如：Android 将阈值设为 35.0 的同时按键增加 0.5，
-                     * 无锁时可能导致竞态（最终值不确定）。
-                     */
                     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
                     g_app_state.temp_threshold = new_threshold;
                     rt_mutex_release(data_lock);
@@ -184,26 +178,48 @@ static void http_handler_thread(void *parameter)
                     publish_temp_threshold();
 
                     int _th_i = (int)new_threshold;
-                    int _th_d = abs((int)((new_threshold - _th_i) * 10));
+                    int _th_dec = abs((int)((new_threshold - _th_i) * 10));
                     char resp[64];
                     rt_snprintf(resp, sizeof(resp),
                                 "{\"status\":\"ok\",\"type\":\"threshold\",\"value\":%d.%d}",
-                                _th_i, _th_d);
+                                _th_i, _th_dec);
                     char header[64];
                     rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
                     send(client_fd, header, strlen(header), 0);
                     send(client_fd, resp, strlen(resp), 0);
-                    rt_kprintf("[net] /api/set threshold -> %d.%d\n",
-                               (int)new_threshold,
-                               abs((int)((new_threshold - (int)new_threshold) * 10)));
                 }
-                else
+            }
+            else if (strcmp(type_buf, "smoke") == 0)
+            {
+                int val = atoi(val_buf);
+                if (val >= 100 && val <= 4000)
                 {
-                    const char *resp = "{\"status\":\"error\",\"msg\":\"invalid threshold range (20-50)\"}";
-                    char header[64];
-                    rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
-                    send(client_fd, header, strlen(header), 0);
-                    send(client_fd, resp, strlen(resp), 0);
+                    rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+                    g_app_state.mq2_threshold = (uint16_t)val;
+                    rt_mutex_release(data_lock);
+                    rt_kprintf("[net] /api/set smoke -> %d\n", val);
+                }
+            }
+            else if (strcmp(type_buf, "flame") == 0)
+            {
+                int val = atoi(val_buf);
+                if (val >= 50 && val <= 4000)
+                {
+                    rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+                    g_app_state.flame_threshold = (uint16_t)val;
+                    rt_mutex_release(data_lock);
+                    rt_kprintf("[net] /api/set flame -> %d\n", val);
+                }
+            }
+            else if (strcmp(type_buf, "pm25") == 0)
+            {
+                float val = atof(val_buf);
+                if (val >= 10.0f && val <= 500.0f)
+                {
+                    rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+                    g_app_state.pm25_threshold = val;
+                    rt_mutex_release(data_lock);
+                    rt_kprintf("[net] /api/set pm25 -> %.0f\n", val);
                 }
             }
             else if (strcmp(type_buf, "beep") == 0)
@@ -358,9 +374,15 @@ static rt_err_t upload_env_data(struct sensor_data *data)
     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
     int th_int = (int)g_app_state.temp_threshold;
     int th_dec = abs((int)((g_app_state.temp_threshold - th_int) * 10));
-    int alarm = g_app_state.alarm_state;
+    int alarm = g_app_state.alarm_type;    /* 0-6 enum */
     int beep  = g_app_state.beep_status;
     rt_mutex_release(data_lock);
+
+    int pm1  = (int)g_cc2530_data.pm.pm1_0;
+    int pm25 = (int)g_cc2530_data.pm.pm2_5;
+    int pm10 = (int)g_cc2530_data.pm.pm10;
+    int mq2  = (int)g_cc2530_data.env.mq2;
+    int flame = (int)g_cc2530_data.env.flame;
 
     sprintf(json_buf,
         "{\"id\":\"%d\",\"version\":\"1.0\",\"params\":{"
@@ -371,7 +393,12 @@ static rt_err_t upload_env_data(struct sensor_data *data)
         "\"tilt_angle\":{\"value\":%d},"
         "\"alarm_state\":{\"value\":%d},"
         "\"beep\":{\"value\":%s},"
-        "\"temp_threshold\":{\"value\":%d.%d}"
+        "\"temp_threshold\":{\"value\":%d.%d},"
+        "\"pm2_5\":{\"value\":%d},"
+        "\"pm1_0\":{\"value\":%d},"
+        "\"pm10\":{\"value\":%d},"
+        "\"mq2\":{\"value\":%d},"
+        "\"flame\":{\"value\":%d}"
         "},\"method\":\"thing.property.post\"}",
         (int)rt_tick_get(),
         temp_int, temp_dec, humi_int, humi_dec, light_int, light_dec,
@@ -379,7 +406,8 @@ static rt_err_t upload_env_data(struct sensor_data *data)
         tilt_abs,
         alarm,
         beep ? "true" : "false",
-        th_int, th_dec);
+        th_int, th_dec,
+        pm25, pm1, pm10, mq2, flame);
 
     rt_err_t ret = onenet_mqtt_publish("$sys/67k36rzgOO/test1/thing/property/post",
                                         (uint8_t *)json_buf, strlen(json_buf));
@@ -397,20 +425,28 @@ static rt_err_t upload_alarm_data(struct sensor_data *data, int alarm_state)
     int beep_val = g_app_state.beep_status;
     rt_mutex_release(data_lock);
 
+    int pm25 = (int)g_cc2530_data.pm.pm2_5;
+    int mq2  = (int)g_cc2530_data.env.mq2;
+    int flame = (int)g_cc2530_data.env.flame;
+
     sprintf(json_buf,
         "{\"id\":\"%d\",\"version\":\"1.0\",\"params\":{"
         "\"vibration\":{\"value\":%d.%d},"
         "\"tilt_angle\":{\"value\":%d},"
         "\"alarm_state\":{\"value\":%d},"
         "\"beep\":{\"value\":%s},"
-        "\"fan_status\":{\"value\":%s}"
+        "\"fan_status\":{\"value\":%s},"
+        "\"pm2_5\":{\"value\":%d},"
+        "\"mq2\":{\"value\":%d},"
+        "\"flame\":{\"value\":%d}"
         "},\"method\":\"thing.property.post\"}",
         (int)rt_tick_get(),
         v_int, 0,
         tilt_abs,
-        alarm_state,
+        alarm_state,               /* 0-6 enum sent as alarm_state */
         beep_val ? "true" : "false",
-        data->actuator_status ? "true" : "false");
+        data->actuator_status ? "true" : "false",
+        pm25, mq2, flame);
 
     rt_err_t ret = onenet_mqtt_publish("$sys/67k36rzgOO/test1/thing/property/post",
                                         (uint8_t *)json_buf, strlen(json_buf));
@@ -536,9 +572,12 @@ static void onenet_upload_thread_entry(void *parameter)
 
         rt_mutex_take(data_lock, RT_WAITING_FOREVER);
         float threshold = g_app_state.temp_threshold;
+        int app_alarm_type = g_app_state.alarm_type;
         rt_mutex_release(data_lock);
 
-        if (data.temperature > threshold)
+        if (app_alarm_type >= 4)
+            current_alarm_state = app_alarm_type;  /* 4=smoke 5=fire 6=pm25 from CC2530 */
+        else if (data.temperature > threshold)
             current_alarm_state = 1;
         else if (data.vibration_detected)
             current_alarm_state = 2;
@@ -759,7 +798,7 @@ void app_net_onenet_start(void)
     rt_thread_t onenet_thread = rt_thread_create("onenet",
                                                    onenet_upload_thread_entry,
                                                    RT_NULL,
-                                                   3072,
+                                                   2048,
                                                    15,
                                                    10);
     if (onenet_thread)

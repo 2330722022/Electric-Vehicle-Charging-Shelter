@@ -6,12 +6,12 @@
 #include <stdio.h>
 
 /*
- * main.c — 项目入口
+ * main.c — 电动车充电棚环境监测系统入口
  *
- * 版本：v2.0 稳定版
- * 日期：2026-05-13
- * 说明：本版本基于 RT-Thread 操作系统，使用多线程、互斥量、信号量、事件集
- *       等 OS 原语实现各功能模块的协同工作，系统稳定运行。
+ * 版本：v2.0 充电棚专版
+ * 日期：2026-05-19
+ * 说明：基于 RT-Thread 操作系统，使用多线程、互斥量、信号量、事件集
+ *       等 OS 原语实现各功能模块协同：温湿度/光照/PM2.5/烟雾/火焰/倾斜/振动。
  *
  * RT-Thread 作为资源调度者的入口职能：
  *   - 不包含业务逻辑代码
@@ -25,8 +25,9 @@
  *   回调运行在 LVGL 线程上下文中，确保所有 LVGL 操作单线程安全。
  *
  * 线程优先级规划：
- *   8  — 逻辑处理线程 (app_logic)     【紧急：温度/倾斜告警立即触发BEEP+舵机】
+ *   8  — 逻辑处理线程 (app_logic)     【紧急：火焰/烟雾/温度/倾斜告警立即触发BEEP+舵机】
  *   10 — paho_mqtt 线程 (PAHO内部)
+ *   12 — CC2530 串口接收线程 (app_logic) 【I/O阻塞，逐字节读取ZigBee数据】
  *   15 — OneNET 上传线程 (app_net)
  *   18 — Web Server 线程 (app_net)
  *   20 — LVGL 线程 (BSP内部)
@@ -40,7 +41,6 @@
 #include "app_net.h"
 
 /* LVGL */
-#include "lv_conf.h"
 #ifdef __has_include
     #if __has_include("lvgl.h")
         #ifndef LV_LVGL_H_INCLUDE_SIMPLE
@@ -65,6 +65,9 @@ extern const lv_img_dsc_t tilt;
 extern const lv_img_dsc_t connected;
 extern const lv_img_dsc_t onenet_upload;
 extern const lv_img_dsc_t Megaphone;
+extern const lv_img_dsc_t smoke_fire;
+extern const lv_img_dsc_t CO_specific;
+extern const lv_img_dsc_t smart_ev_log;
 
 /* ==================== 引脚定义 ==================== */
 #define LED_R_PIN       GET_PIN(F, 12)
@@ -86,6 +89,7 @@ static lv_obj_t *label_humi_val;
 static lv_obj_t *label_light_val;
 static lv_obj_t *label_tilt_x_val;
 static lv_obj_t *label_tilt_y_val;
+static lv_obj_t *label_pm25_val;
 static lv_obj_t *label_alarm_status;
 static lv_obj_t *img_beep_status;
 static lv_obj_t *img_wifi_status;
@@ -109,12 +113,12 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
     struct sensor_data local_data;
     char buf[32];
 
-    /* 读取传感器数据 — 非阻塞尝试，传感器线程持有锁时跳过本周期 */
-    if (rt_mutex_take(data_mutex, 1) == RT_EOK) {
+    /* 读取传感器数据 — 等待传感器线程释放锁 */
+    if (rt_mutex_take(data_mutex, 50) == RT_EOK) {
         local_data = shared_data;
         rt_mutex_release(data_mutex);
     } else {
-        return; /* 数据未就绪，下一轮再刷新 */
+        return;
     }
 
     /* 温度 */
@@ -138,6 +142,16 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
     rt_sprintf(buf, "Y:%d.%d", (int)local_data.tilt_angle_y,
                abs((int)((local_data.tilt_angle_y - (int)local_data.tilt_angle_y) * 10)));
     lv_label_set_text(label_tilt_y_val, buf);
+
+    /* PM2.5 (CC2530 ZigBee) */
+    {
+        uint16_t pm = g_cc2530_data.pm.pm2_5;
+        if (pm > 0)
+            rt_sprintf(buf, "PM2.5:%u", (unsigned)pm);
+        else
+            rt_sprintf(buf, "PM2.5:--");
+        lv_label_set_text(label_pm25_val, buf);
+    }
 
     /* WiFi状态 */
     if (wifi_connected)
@@ -167,7 +181,22 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
             lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
 
         /* 告警状态 & 主图 */
-        if (local_data.temperature > threshold) {
+        if (g_app_state.alarm_type == 5) {
+            lv_img_set_src(img_main_status, &smoke_fire);
+            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+            lv_label_set_text(label_alarm_status, "系统报警");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+        } else if (g_app_state.alarm_type == 4) {
+            lv_img_set_src(img_main_status, &smoke_fire);
+            lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+            lv_label_set_text(label_alarm_status, "烟雾报警");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
+        } else if (g_app_state.alarm_type == 6) {
+            lv_img_set_src(img_main_status, &CO_specific);
+            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+            lv_label_set_text(label_alarm_status, "PM2.5异常");
+            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        } else if (local_data.temperature > threshold) {
             lv_img_set_src(img_main_status, &Alarm);
             lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
             lv_label_set_text(label_alarm_status, "温度过高");
@@ -175,10 +204,10 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
         } else if (local_data.tilt_alarm) {
             lv_img_set_src(img_main_status, &tilt);
             lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "货架倾斜");
+            lv_label_set_text(label_alarm_status, "设备异常");
             lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
         } else {
-            lv_img_set_src(img_main_status, &Environmental);
+            lv_img_set_src(img_main_status, &smart_ev_log);
             lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
             lv_label_set_text(label_alarm_status, "正常");
             lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_GREEN), 0);
@@ -188,7 +217,7 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
     }
 }
 
-/* ==================== UI初始化 ==================== */
+/* ==================== 充电棚UI初始化 ==================== */
 static void warehouse_ui_init(void)
 {
     lv_obj_t *scr = lv_scr_act();
@@ -205,7 +234,7 @@ static void warehouse_ui_init(void)
     lv_obj_t *title = lv_label_create(scr);
     lv_obj_set_style_text_font(title, &my_font_cn_16, 0);
     lv_obj_set_style_text_color(title, lv_color_black(), 0);
-    lv_label_set_text(title, "仓库环境监测");
+    lv_label_set_text(title, "充电棚环境监测");
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
 
     lv_obj_t *img_temp = lv_img_create(scr);
@@ -254,6 +283,16 @@ static void warehouse_ui_init(void)
     lv_label_set_text(label_tilt_y_val, "Y: --.-");
     lv_obj_align_to(label_tilt_y_val, label_tilt_x_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
 
+    label_pm25_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_pm25_val, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(label_pm25_val, lv_color_black(), 0);
+    lv_label_set_text(label_pm25_val, "PM2.5:--");
+    lv_obj_align_to(label_pm25_val, label_tilt_y_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
+
+    lv_obj_t *img_pm25 = lv_img_create(scr);
+    lv_img_set_src(img_pm25, &CO_specific);
+    lv_obj_align_to(img_pm25, label_pm25_val, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+
     label_alarm_status = lv_label_create(scr);
     lv_obj_set_style_text_font(label_alarm_status, &my_font_cn_16, 0);
     lv_obj_set_style_text_color(label_alarm_status, lv_color_black(), 0);
@@ -261,7 +300,7 @@ static void warehouse_ui_init(void)
     lv_obj_align(label_alarm_status, LV_ALIGN_BOTTOM_LEFT, 10, -10);
 
     img_main_status = lv_img_create(scr);
-    lv_img_set_src(img_main_status, &Environmental);
+    lv_img_set_src(img_main_status, &smart_ev_log);
     lv_obj_align(img_main_status, LV_ALIGN_BOTTOM_MID, 0, -10);
 
     img_beep_status = lv_img_create(scr);
@@ -276,9 +315,9 @@ static void warehouse_ui_init(void)
     lv_obj_align_to(label_threshold_val, label_light_val, LV_ALIGN_OUT_BOTTOM_MID, 0, 25);
 
     /*
-     * 注册 lv_timer 周期性刷新回调 — 200ms 周期，运行在 LVGL 线程上下文。
-     * LVGL v8 API: lv_timer_create(callback, period_ms, user_data)
-     * 这是唯一操作 LVGL 对象的地方，确保线程安全。
+     * [静态显示模式] 注册 lv_timer 周期性刷新回调
+     * 注释后 UI 仅初始化一次，不周期性刷新，节省 CPU 和堆内存
+     * 后续启用时取消注释此句即可恢复动态更新
      */
     lv_timer_create(lv_ui_refresh_task, 200, NULL);
 }
@@ -331,8 +370,17 @@ int main(void)
 
     print_memory("boot_done");
 
-    while (1)
     {
-        rt_thread_mdelay(1000);
+        int heartbeat = 0;
+        rt_size_t total, used, max_used;
+        while (1)
+        {
+            rt_thread_mdelay(5000);
+            heartbeat++;
+            rt_pin_write(LED_R_PIN, (heartbeat & 1) ? PIN_LOW : PIN_HIGH);
+            rt_memory_info(&total, &used, &max_used);
+            rt_kprintf("[HB] tick=%d used=%u/%u KB\n",
+                       heartbeat, used / 1024, total / 1024);
+        }
     }
 }

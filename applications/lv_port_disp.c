@@ -2,13 +2,14 @@
  * LVGL Display Port for ST7789 LCD
  */
 
-#include "lv_conf.h"
 #include <lvgl.h>
 #include <drv_lcd.h>
 
-/* LCD buffer for LVGL (minimal size for memory saving) */
+/* LCD buffer for LVGL — 15 rows = 1/16 screen, flush from 16 slices */
+/* buf1 置于 CCMRAM (RAM2 @ 0x10000000)，释放 ~7KB RAM1 空间 */
 static lv_disp_draw_buf_t disp_buf;
-static lv_color_t buf1[LCD_W * 5];  /* 240 * 5 = 1200 pixels */
+#define DISP_BUF_LINES 15
+static lv_color_t buf1[LCD_W * DISP_BUF_LINES] __attribute__((section(".ccmram")));  /* 240 * 15 * 2 = 7200 bytes */
 
 /* Flush callback: copy buffer to LCD */
 static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p)
@@ -38,8 +39,9 @@ void lv_port_disp_init(void)
     rt_kprintf("LCD cleared to white\n");
     
     /* Initialize display buffer */
-    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, LCD_W * 5);
-    rt_kprintf("LVGL display buffer initialized\n");
+    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, LCD_W * DISP_BUF_LINES);
+    rt_kprintf("LVGL display buffer initialized (%u bytes)\n",
+               (unsigned)(LCD_W * DISP_BUF_LINES * sizeof(lv_color_t)));
     
     /* Initialize display driver */
     static lv_disp_drv_t disp_drv;

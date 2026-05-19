@@ -38,6 +38,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <rtthread.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,7 +101,23 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  rt_kprintf("\n========== HARDFAULT ==========\n");
+  rt_kprintf("  CFSR=0x%08X  HFSR=0x%08X\n", SCB->CFSR, SCB->HFSR);
+  rt_kprintf("  MMFAR=0x%08X  BFAR=0x%08X\n", SCB->MMFAR, SCB->BFAR);
+  {
+    uint32_t stacked_r0, stacked_r1, stacked_r2, stacked_r3;
+    uint32_t stacked_r12, stacked_lr, stacked_pc, stacked_psr;
+    __asm volatile (
+      "TST LR, #4         \n"
+      "ITE EQ             \n"
+      "MRSEQ R0, MSP      \n"
+      "MRSNE R0, PSP      \n"
+      "LDR %[r0], [R0, #0]\n"
+      : [r0] "=r" (stacked_r0)
+    );
+    rt_kprintf("  stacked_R0=0x%08X\n", stacked_r0);
+  }
+  rt_kprintf("===============================\n");
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -115,7 +132,8 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  rt_kprintf("\n======== MEM MANAGE FAULT =====\n");
+  rt_kprintf("  CFSR=0x%08X  MMFAR=0x%08X\n", SCB->CFSR, SCB->MMFAR);
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -130,7 +148,8 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  rt_kprintf("\n========== BUS FAULT ==========\n");
+  rt_kprintf("  CFSR=0x%08X  BFAR=0x%08X\n", SCB->CFSR, SCB->BFAR);
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -145,7 +164,8 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  rt_kprintf("\n======== USAGE FAULT ==========\n");
+  rt_kprintf("  CFSR=0x%08X\n", SCB->CFSR);
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

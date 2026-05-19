@@ -94,15 +94,6 @@ SECTIONS
         _edata = . ;
     } >RAM1
 
-    .stack :
-    {
-        . = ALIGN(4);
-        _sstack = .;
-        . = . + _system_stack_size;
-        . = ALIGN(4);
-        _estack = .;
-    } >RAM1
-
     __bss_start = .;
     .bss :
     {
@@ -121,6 +112,25 @@ SECTIONS
         *(.bss.init)
     } > RAM1
     __bss_end = .;
+
+    /* 系统栈 — 移至 CCMRAM (RAM2)，释放 RAM1 空间 */
+    .stack :
+    {
+        . = ALIGN(4);
+        _sstack = .;
+        . = . + _system_stack_size;
+        . = ALIGN(4);
+        _estack = .;
+    } >RAM2
+
+    /* LVGL 显示缓冲区专用段 — 置于 CCMRAM (RAM2)，D-Bus 高速访问 */
+    .ccmram (NOLOAD) :
+    {
+        . = ALIGN(4);
+        *(.ccmram)
+        *(.ccmram.*)
+        . = ALIGN(4);
+    } >RAM2
 
     .MCUlcdgrambysram (NOLOAD) : ALIGN(4)
     {

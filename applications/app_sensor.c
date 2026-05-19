@@ -11,9 +11,9 @@
 #include "icm20608.h"
 
 /*
- * 模块：传感器采集 (app_sensor.c)
- * 版本：v2.0 稳定版
- * 日期：2026-05-13
+ * 模块：传感器采集 (app_sensor.c) — 电动车充电棚环境监测
+ * 版本：v2.0 充电棚专版
+ * 日期：2026-05-19
  * OS 概念体现：
  *   1. 多线程调度 — 采集线程设为优先级25（低优先级），让出 CPU 给显示(21)
  *      和逻辑处理(16)线程。OS 按优先级抢占调度，高优先级就绪时低优先级自动挂起。
@@ -116,12 +116,18 @@ static void sensor_thread_entry(void *parameter)
         rt_memset(&data, 0, sizeof(struct sensor_data));
 
         /* 读取温度 & 湿度 (I2C3 — AHT10) */
-        data.temperature = aht10_read_temperature((aht10_device_t)aht20_dev);
-        data.humidity    = aht10_read_humidity((aht10_device_t)aht20_dev);
+        if (aht20_dev != RT_NULL)
+        {
+            data.temperature = aht10_read_temperature((aht10_device_t)aht20_dev);
+            data.humidity    = aht10_read_humidity((aht10_device_t)aht20_dev);
+        }
 
         /* 读取光照 & 接近 (I2C2 — AP3216C) */
-        data.light       = ap3216c_read_ambient_light((ap3216c_device_t)ap3216c_dev);
-        data.proximity   = ap3216c_read_ps_data((ap3216c_device_t)ap3216c_dev);
+        if (ap3216c_dev != RT_NULL)
+        {
+            data.light       = ap3216c_read_ambient_light((ap3216c_device_t)ap3216c_dev);
+            data.proximity   = ap3216c_read_ps_data((ap3216c_device_t)ap3216c_dev);
+        }
 
         /* 读取加速度计 + 陀螺仪 (I2C2 — ICM20608) */
         if (icm20608_dev != RT_NULL)
@@ -145,7 +151,7 @@ static void sensor_thread_entry(void *parameter)
                          * 而是通过事件集异步通知专用的逻辑线程处理。
                          */
                         rt_event_send(&evt_alarm, EVENT_TILT_ALARM);
-                        rt_kprintf("[sensor] ALERT: Shelf tilted! X:%d Y:%d\n",
+                        rt_kprintf("[sensor] ALERT: Device tilted! X:%d Y:%d\n",
                                    (int)data.tilt_angle_x, (int)data.tilt_angle_y);
                     }
                 }
@@ -191,6 +197,14 @@ static void sensor_thread_entry(void *parameter)
         /* 调用业务逻辑中心进行温度阈值判定 */
         logic_handle(data.temperature);
 
+        /* 电动车充电棚专属：CC2530 环境数据告警判定 */
+        if (g_cc2530_data.pm.valid || g_cc2530_data.env.valid)
+        {
+            logic_handle_cc2530(g_cc2530_data.pm.pm2_5,
+                                g_cc2530_data.env.mq2,
+                                g_cc2530_data.env.flame);
+        }
+
         /* 同步 actuator 状态 */
         rt_mutex_take(data_lock, RT_WAITING_FOREVER);
         data.actuator_status = g_app_state.beep_status;
@@ -231,7 +245,7 @@ static void sensor_thread_entry(void *parameter)
 
         rt_mutex_release(data_mutex);
 
-        /* 5 秒采样周期 — 环境监测无需高速采集 */
+        /* 5 秒采样周期 */
         rt_thread_mdelay(5000);
     }
 }
@@ -261,10 +275,14 @@ void app_sensor_init(void)
     aht20_dev = (void *)aht10_init("i2c3");
     if (aht20_dev == RT_NULL)
         rt_kprintf("[sensor] WARN: AHT10 init failed\n");
+    else
+        rt_kprintf("[sensor] AHT10 OK (i2c3)\n");
 
     ap3216c_dev = (void *)ap3216c_init("i2c2");
     if (ap3216c_dev == RT_NULL)
         rt_kprintf("[sensor] WARN: AP3216C init failed\n");
+    else
+        rt_kprintf("[sensor] AP3216C OK (i2c2)\n");
 
     icm20608_dev = (void *)icm20608_init("i2c2");
     if (icm20608_dev != RT_NULL)
@@ -287,7 +305,7 @@ void app_sensor_init(void)
                                         sensor_thread_entry,
                                         RT_NULL,
                                         3072,
-                                        25,     /* 优先级 25 — 体现低优先级调度 */
+                                        25,
                                         10);
     if (tid)
     {
