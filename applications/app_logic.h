@@ -3,6 +3,47 @@
 
 #include <rtthread.h>
 
+/* ==================== 日志级别控制 ==================== */
+#define LOG_LEVEL_NONE    0
+#define LOG_LEVEL_ERROR   1
+#define LOG_LEVEL_WARN    2
+#define LOG_LEVEL_INFO    3
+#define LOG_LEVEL_DEBUG   4
+
+#ifndef LOG_LEVEL
+#define LOG_LEVEL         LOG_LEVEL_INFO
+#endif
+
+#define LOG_COLOR_RED     "\033[31m"
+#define LOG_COLOR_YELLOW  "\033[33m"
+#define LOG_COLOR_GREEN   "\033[32m"
+#define LOG_COLOR_BLUE    "\033[34m"
+#define LOG_COLOR_RESET   "\033[0m"
+
+#if LOG_LEVEL >= LOG_LEVEL_ERROR
+#define LOG_E(tag, fmt, ...) rt_kprintf(LOG_COLOR_RED "[E/%s] " fmt LOG_COLOR_RESET "\n", tag, ##__VA_ARGS__)
+#else
+#define LOG_E(tag, fmt, ...)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_WARN
+#define LOG_W(tag, fmt, ...) rt_kprintf(LOG_COLOR_YELLOW "[W/%s] " fmt LOG_COLOR_RESET "\n", tag, ##__VA_ARGS__)
+#else
+#define LOG_W(tag, fmt, ...)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_INFO
+#define LOG_I(tag, fmt, ...) rt_kprintf(LOG_COLOR_GREEN "[I/%s] " fmt LOG_COLOR_RESET "\n", tag, ##__VA_ARGS__)
+#else
+#define LOG_I(tag, fmt, ...)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_DEBUG
+#define LOG_D(tag, fmt, ...) rt_kprintf(LOG_COLOR_BLUE "[D/%s] " fmt LOG_COLOR_RESET "\n", tag, ##__VA_ARGS__)
+#else
+#define LOG_D(tag, fmt, ...)
+#endif
+
 /* ==================== 业务状态结构体 ==================== */
 struct app_state {
     float temp_threshold;       /* 温度阈值 */
@@ -83,6 +124,8 @@ void app_logic_init(void);
 /* ==================== 核心处理 — 临界区保护 ==================== */
 void logic_handle(float temperature);
 void logic_handle_cc2530(uint16_t pm2_5, uint16_t mq2, uint16_t flame);
+void logic_handle_cc2530_env(uint16_t mq2, uint16_t flame);
+void logic_handle_cc2530_pm(uint16_t pm2_5);
 
 /* ==================== BEEP 控制 ==================== */
 void beep_set(uint8_t on);
@@ -92,5 +135,8 @@ void process_key_events(void);
 
 /* ==================== LCD显示阈值更新 ==================== */
 void update_threshold_display(void);
+
+/* ==================== 看门狗喂狗 ==================== */
+void watchdog_feed(void);
 
 #endif

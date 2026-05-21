@@ -1,5 +1,6 @@
 #include "app_sensor.h"
 #include "app_logic.h"
+#include "app_net.h"
 #include <board.h>
 #include <rtdevice.h>
 #include <math.h>
@@ -12,13 +13,13 @@
 
 /*
  * 模块：传感器采集 (app_sensor.c) — 电动车充电棚环境监测
- * 版本：v2.0 充电棚专版
- * 日期：2026-05-19
+ * 版本：v2.1 充电棚专版 (事件集同步)
+ * 日期：2026-05-20
  * OS 概念体现：
- *   1. 多线程调度 — 采集线程设为优先级25（低优先级），让出 CPU 给显示(21)
- *      和逻辑处理(16)线程。OS 按优先级抢占调度，高优先级就绪时低优先级自动挂起。
- *   2. 事件集 — 采用生产者-消费者模式：传感器线程(生产者)检测到温度/倾斜/振动异常时
- *      发送 EVENT_ALARM，逻辑线程(消费者)阻塞等待，实现异步解耦。
+ *   1. 多线程调度 — 采集线程设为优先级22（低于 OneNET 上传15，高于逻辑处理8），
+ *      RT-Thread 抢占式调度确保高优先级线程就绪时立即抢占 CPU。
+ *   2. 事件集 — 传感器线程启动时阻塞等待 EVENT_MQTT_OK，
+ *      确保 MQTT 连接就绪后才开始采集循环，避免告警事件无法上传。
  *   3. 总线驱动管理 — AHT10 挂载 I2C3，ICM20608 挂载 I2C2，RT-Thread 设备框架
  *      通过统一的 rt_device 接口管理不同总线设备，上层无需关心底层时序。
  */
@@ -67,7 +68,6 @@ struct sensor_data shared_data;
 rt_mutex_t data_mutex = RT_NULL;
 
 char status_json[256];
-char data_json[256];
 
 void *aht20_dev = RT_NULL;
 void *ap3216c_dev = RT_NULL;
@@ -109,31 +109,76 @@ static void sensor_thread_entry(void *parameter)
     rt_int16_t accel_x, accel_y, accel_z;
     rt_int16_t gyro_x, gyro_y, gyro_z;
     static int tilt_warning_count = 0;
+    static int loop_count = 0;
+    rt_uint32_t events;
 #define VIBRATION_THRESHOLD 1000
+
+#define TAG "sensor"
+
+    LOG_I(TAG, "Thread entry, waiting for EVENT_MQTT_OK...");
+    rt_event_recv(&sys_event, EVENT_MQTT_OK,
+                  RT_EVENT_FLAG_AND | RT_EVENT_FLAG_CLEAR,
+                  RT_WAITING_FOREVER, &events);
+    LOG_I(TAG, "EVENT_MQTT_OK received, starting sensor loop");
 
     while (1)
     {
+        loop_count++;
+
         rt_memset(&data, 0, sizeof(struct sensor_data));
 
         /* 读取温度 & 湿度 (I2C3 — AHT10) */
         if (aht20_dev != RT_NULL)
         {
-            data.temperature = aht10_read_temperature((aht10_device_t)aht20_dev);
-            data.humidity    = aht10_read_humidity((aht10_device_t)aht20_dev);
+            float t = aht10_read_temperature((aht10_device_t)aht20_dev);
+            float h = aht10_read_humidity((aht10_device_t)aht20_dev);
+            if (t > -50.0f && t < 125.0f && h >= 0.0f && h <= 100.0f)
+            {
+                data.temperature = t;
+                data.humidity    = h;
+                LOG_D(TAG, "T=%.1f H=%.1f", t, h);
+            }
+            else
+            {
+                LOG_W(TAG, "AHT10 invalid: T=%.1f H=%.1f", t, h);
+            }
         }
 
         /* 读取光照 & 接近 (I2C2 — AP3216C) */
         if (ap3216c_dev != RT_NULL)
         {
-            data.light       = ap3216c_read_ambient_light((ap3216c_device_t)ap3216c_dev);
-            data.proximity   = ap3216c_read_ps_data((ap3216c_device_t)ap3216c_dev);
+            float als = ap3216c_read_ambient_light((ap3216c_device_t)ap3216c_dev);
+            uint16_t ps = ap3216c_read_ps_data((ap3216c_device_t)ap3216c_dev);
+
+            if (als >= 0.0f && als < 100000.0f)
+            {
+                data.light = als;
+            }
+            else
+            {
+                LOG_W(TAG, "AP3216C ALS invalid: %.0f", als);
+                data.light = 0;
+            }
+
+            if (ps < 0x1000)
+            {
+                data.proximity = ps;
+            }
+            else
+            {
+                LOG_W(TAG, "AP3216C PS invalid: %u", ps);
+                data.proximity = 0;
+            }
+
+            LOG_D(TAG, "Light=%.0f Lux PS=%u", data.light, data.proximity);
         }
 
         /* 读取加速度计 + 陀螺仪 (I2C2 — ICM20608) */
         if (icm20608_dev != RT_NULL)
         {
-            if (icm20608_get_accel((icm20608_device_t)icm20608_dev,
-                                   &accel_x, &accel_y, &accel_z) == RT_EOK)
+            rt_err_t acc_ret = icm20608_get_accel((icm20608_device_t)icm20608_dev,
+                                   &accel_x, &accel_y, &accel_z);
+            if (acc_ret == RT_EOK)
             {
                 calculate_tilt_angle(accel_x, accel_y, accel_z,
                                      &data.tilt_angle_x, &data.tilt_angle_y);
@@ -145,14 +190,9 @@ static void sensor_thread_entry(void *parameter)
                     if (tilt_warning_count >= TILT_SENSITIVITY)
                     {
                         data.tilt_alarm = 1;
-                        /*
-                         * 检测到倾斜告警 → 发送事件通知逻辑线程。
-                         * 事件驱动模型：传感器线程不直接操作 BEEP/舵机，
-                         * 而是通过事件集异步通知专用的逻辑线程处理。
-                         */
                         rt_event_send(&evt_alarm, EVENT_TILT_ALARM);
-                        rt_kprintf("[sensor] ALERT: Device tilted! X:%d Y:%d\n",
-                                   (int)data.tilt_angle_x, (int)data.tilt_angle_y);
+                        LOG_W(TAG, "ALERT: Device tilted! X:%.1f Y:%.1f",
+                              data.tilt_angle_x, data.tilt_angle_y);
                     }
                 }
                 else
@@ -163,13 +203,15 @@ static void sensor_thread_entry(void *parameter)
             }
             else
             {
+                LOG_E(TAG, "ICM20608 accel read err=%d", acc_ret);
                 data.tilt_angle_x = 0;
                 data.tilt_angle_y = 0;
                 data.tilt_alarm = 0;
             }
 
-            if (icm20608_get_gyro((icm20608_device_t)icm20608_dev,
-                                  &gyro_x, &gyro_y, &gyro_z) == RT_EOK)
+            rt_err_t gyro_ret = icm20608_get_gyro((icm20608_device_t)icm20608_dev,
+                                  &gyro_x, &gyro_y, &gyro_z);
+            if (gyro_ret == RT_EOK)
             {
                 int vib = (abs(gyro_x) > VIBRATION_THRESHOLD ||
                            abs(gyro_y) > VIBRATION_THRESHOLD ||
@@ -178,15 +220,13 @@ static void sensor_thread_entry(void *parameter)
 
                 if (vib)
                 {
-                    /*
-                     * 检测到振动告警 → 发送事件通知逻辑线程。
-                     */
                     rt_event_send(&evt_alarm, EVENT_VIBRATION_ALARM);
-                    rt_kprintf("[sensor] ALERT: Vibration detected!\n");
+                    LOG_W(TAG, "ALERT: Vibration detected!");
                 }
             }
             else
             {
+                LOG_E(TAG, "ICM20608 gyro read err=%d", gyro_ret);
                 data.vibration_detected = 0;
             }
         }
@@ -197,12 +237,29 @@ static void sensor_thread_entry(void *parameter)
         /* 调用业务逻辑中心进行温度阈值判定 */
         logic_handle(data.temperature);
 
-        /* 电动车充电棚专属：CC2530 环境数据告警判定 */
-        if (g_cc2530_data.pm.valid || g_cc2530_data.env.valid)
+        /* 电动车充电棚专属：CC2530 环境数据告警判定 — 临界区快照读取 */
         {
-            logic_handle_cc2530(g_cc2530_data.pm.pm2_5,
-                                g_cc2530_data.env.mq2,
-                                g_cc2530_data.env.flame);
+            uint16_t mq2_local = 0, flame_local = 0, pm25_local = 0;
+            uint8_t env_valid = 0, pm_valid = 0;
+
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+            env_valid = g_cc2530_data.env.valid;
+            if (env_valid)
+            {
+                mq2_local   = g_cc2530_data.env.mq2;
+                flame_local = g_cc2530_data.env.flame;
+            }
+            pm_valid = g_cc2530_data.pm.valid;
+            if (pm_valid)
+            {
+                pm25_local = g_cc2530_data.pm.pm2_5;
+            }
+            rt_mutex_release(data_lock);
+
+            if (env_valid)
+                logic_handle_cc2530_env(mq2_local, flame_local);
+            if (pm_valid)
+                logic_handle_cc2530_pm(pm25_local);
         }
 
         /* 同步 actuator 状态 */
@@ -229,21 +286,9 @@ static void sensor_thread_entry(void *parameter)
                         _th_i, _th_d);
         }
 
-        /* 构建 data JSON — Android 轮询响应 */
-        {
-            int temp_int = (int)data.temperature;
-            int temp_dec = abs((int)((data.temperature - temp_int) * 10));
-            int humi_int = (int)data.humidity;
-            int humi_dec = abs((int)((data.humidity - humi_int) * 10));
-            int _th_i = (int)local_threshold;
-            int _th_d = (int)((local_threshold - _th_i) * 10);
-            if (_th_d < 0) _th_d = -_th_d;
-            rt_snprintf(data_json, sizeof(data_json),
-                        "{\"temp\":%d.%d,\"humi\":%d.%d,\"threshold\":%d.%d}",
-                        temp_int, temp_dec, humi_int, humi_dec, _th_i, _th_d);
-        }
-
         rt_mutex_release(data_mutex);
+
+        LOG_D(TAG, "#%d T=%.1f H=%.1f L=%.0f", loop_count, data.temperature, data.humidity, data.light);
 
         /* 5 秒采样周期 */
         rt_thread_mdelay(5000);
@@ -256,7 +301,7 @@ static void sensor_thread_entry(void *parameter)
  *   创建互斥量保护共享数据，初始化传感器硬件，启动采集线程。
  *
  *   初始化序列：
- *     1. 创建 data_mutex — 保护 shared_data、status_json、data_json
+ *     1. 创建 data_mutex — 保护 shared_data、status_json
  *     2. 初始化 I2C 总线传感器（AHT10、AP3216C、ICM20608）
  *     3. 校准 ICM20608（消除零偏）
  *     4. 启动采集线程（优先级 25，低优先级）
@@ -267,49 +312,49 @@ void app_sensor_init(void)
     data_mutex = rt_mutex_create("data_mutex", RT_IPC_FLAG_FIFO);
     if (data_mutex == RT_NULL)
     {
-        rt_kprintf("[sensor] FATAL: data_mutex create failed!\n");
+        LOG_E(TAG, "data_mutex create failed!");
         return;
     }
 
     /* 2. 初始化传感器硬件 */
     aht20_dev = (void *)aht10_init("i2c3");
     if (aht20_dev == RT_NULL)
-        rt_kprintf("[sensor] WARN: AHT10 init failed\n");
+        LOG_W(TAG, "AHT10 init failed");
     else
-        rt_kprintf("[sensor] AHT10 OK (i2c3)\n");
+        LOG_I(TAG, "AHT10 OK (i2c3)");
 
     ap3216c_dev = (void *)ap3216c_init("i2c2");
     if (ap3216c_dev == RT_NULL)
-        rt_kprintf("[sensor] WARN: AP3216C init failed\n");
+        LOG_W(TAG, "AP3216C init failed");
     else
-        rt_kprintf("[sensor] AP3216C OK (i2c2)\n");
+        LOG_I(TAG, "AP3216C OK (i2c2)");
 
     icm20608_dev = (void *)icm20608_init("i2c2");
     if (icm20608_dev != RT_NULL)
     {
         /* 3. 校准 — 采集 100 个样本计算零偏 */
         icm20608_calib_level((icm20608_device_t)icm20608_dev, 100);
-        rt_kprintf("[sensor] ICM20608 calibrated\n");
+        LOG_I(TAG, "ICM20608 calibrated");
     }
     else
     {
-        rt_kprintf("[sensor] WARN: ICM20608 init failed\n");
+        LOG_W(TAG, "ICM20608 init failed");
     }
 
-    /* 4. 启动采集线程 — 优先级25（低优先级）*/
-    /*
-     * 优先级 25：低于显示线程(21)、Web Server(18)、逻辑线程(16)，
-     * 确保传感器采集不阻塞 UI 刷新和网络响应。
-     */
+    /* 4. 启动采集线程 — 优先级22（低于LVGL线程20，高于CC2530接收线程24）*/
     rt_thread_t tid = rt_thread_create("sensor",
                                         sensor_thread_entry,
                                         RT_NULL,
-                                        3072,
-                                        25,
+                                        4096,
+                                        22,
                                         10);
     if (tid)
     {
         rt_thread_startup(tid);
-        rt_kprintf("[sensor] Thread started (prio=25, interval=5s)\n");
+        LOG_I(TAG, "Thread started (prio=22, interval=5s)");
+    }
+    else
+    {
+        LOG_E(TAG, "Failed to create thread!");
     }
 }

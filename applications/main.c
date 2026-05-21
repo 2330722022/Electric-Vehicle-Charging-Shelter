@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <drivers/watchdog.h>
 
 /*
  * main.c — 电动车充电棚环境监测系统入口
@@ -40,6 +41,33 @@
 #include "app_sensor.h"
 #include "app_net.h"
 
+#define TAG "main"
+
+static rt_device_t wdt_dev = RT_NULL;
+
+void watchdog_feed(void)
+{
+    if (wdt_dev != RT_NULL)
+        rt_device_control(wdt_dev, RT_DEVICE_CTRL_WDT_KEEPALIVE, RT_NULL);
+}
+
+static void watchdog_init(void)
+{
+    wdt_dev = rt_device_find("wdt");
+    if (wdt_dev == RT_NULL)
+    {
+        LOG_E(TAG, "Watchdog device not found, WDT disabled");
+        return;
+    }
+
+    rt_uint32_t timeout = 5;
+    rt_device_control(wdt_dev, RT_DEVICE_CTRL_WDT_SET_TIMEOUT, &timeout);
+    rt_device_control(wdt_dev, RT_DEVICE_CTRL_WDT_START, RT_NULL);
+    rt_device_control(wdt_dev, RT_DEVICE_CTRL_WDT_KEEPALIVE, RT_NULL);
+
+    LOG_I(TAG, "Watchdog initialized (timeout=%dS)", (int)timeout);
+}
+
 /* LVGL */
 #ifdef __has_include
     #if __has_include("lvgl.h")
@@ -51,11 +79,11 @@
 #if defined(LV_LVGL_H_INCLUDE_SIMPLE)
     #include "lvgl.h"
 #else
-    #include "lvgl/lvgl.h"
+    #include "lvgl/lvgl.h"/
 #endif
 
 void lv_port_disp_init(void);
-LV_FONT_DECLARE(my_font_cn_16);
+LV_FONT_DECLARE(font);
 
 extern const lv_img_dsc_t Environmental;
 extern const lv_img_dsc_t waterprof;
@@ -77,7 +105,7 @@ static void print_memory(const char *tag)
 {
     rt_size_t total, used, max_used;
     rt_memory_info(&total, &used, &max_used);
-    rt_kprintf("[MEM] %s - Total: %u KB, Used: %u KB (%u%%), Max Used: %u KB (%u%%)\n",
+    LOG_I(TAG, "MEM %s - Total: %u KB, Used: %u KB (%u%%), Max Used: %u KB (%u%%)",
                tag, total / 1024, used / 1024, (used * 100) / total,
                max_used / 1024, (max_used * 100) / total);
 }
@@ -87,8 +115,6 @@ static lv_obj_t *img_main_status;
 static lv_obj_t *label_temp_val;
 static lv_obj_t *label_humi_val;
 static lv_obj_t *label_light_val;
-static lv_obj_t *label_tilt_x_val;
-static lv_obj_t *label_tilt_y_val;
 static lv_obj_t *label_pm25_val;
 static lv_obj_t *label_alarm_status;
 static lv_obj_t *img_beep_status;
@@ -112,13 +138,29 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
 {
     struct sensor_data local_data;
     char buf[32];
+    static int refresh_count = 0;
+    static int diag_interval = 10;
+
+    refresh_count++;
 
     /* 读取传感器数据 — 等待传感器线程释放锁 */
     if (rt_mutex_take(data_mutex, 50) == RT_EOK) {
         local_data = shared_data;
         rt_mutex_release(data_mutex);
     } else {
+        if (refresh_count % diag_interval == 0)
+            LOG_W(TAG, "refresh #%d: data_mutex timeout", refresh_count);
         return;
+    }
+
+    if (refresh_count % diag_interval == 0)
+    {
+        int ti = (int)local_data.temperature;
+        int td = abs((int)((local_data.temperature - ti) * 10));
+        int hi = (int)local_data.humidity;
+        int hd = abs((int)((local_data.humidity - hi) * 10));
+        LOG_D(TAG, "refresh #%d OK, T=%d.%d H=%d.%d",
+                   refresh_count, ti, td, hi, hd);
     }
 
     /* 温度 */
@@ -134,14 +176,6 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
     /* 光照 */
     rt_sprintf(buf, "%d Lux", (int)local_data.light);
     lv_label_set_text(label_light_val, buf);
-
-    /* 倾斜角 X/Y */
-    rt_sprintf(buf, "X:%d.%d", (int)local_data.tilt_angle_x,
-               abs((int)((local_data.tilt_angle_x - (int)local_data.tilt_angle_x) * 10)));
-    lv_label_set_text(label_tilt_x_val, buf);
-    rt_sprintf(buf, "Y:%d.%d", (int)local_data.tilt_angle_y,
-               abs((int)((local_data.tilt_angle_y - (int)local_data.tilt_angle_y) * 10)));
-    lv_label_set_text(label_tilt_y_val, buf);
 
     /* PM2.5 (CC2530 ZigBee) */
     {
@@ -169,7 +203,7 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
                 int th_int = (int)threshold;
                 int th_dec = (int)((threshold - th_int) * 10);
                 if (th_dec < 0) th_dec = -th_dec;
-                rt_snprintf(buf, sizeof(buf), "%d.%dC", th_int, th_dec);
+                rt_snprintf(buf, sizeof(buf), "阈值:%d.%dC", th_int, th_dec);
                 lv_label_set_text(label_threshold_val, buf);
             }
         }
@@ -199,12 +233,12 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
         } else if (local_data.temperature > threshold) {
             lv_img_set_src(img_main_status, &Alarm);
             lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
-            lv_label_set_text(label_alarm_status, "温度过高");
+            lv_label_set_text(label_alarm_status, "温度报警");
             lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
         } else if (local_data.tilt_alarm) {
             lv_img_set_src(img_main_status, &tilt);
             lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "设备异常");
+            lv_label_set_text(label_alarm_status, "倾倒报警");
             lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
         } else {
             lv_img_set_src(img_main_status, &smart_ev_log);
@@ -218,11 +252,22 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
 }
 
 /* ==================== 充电棚UI初始化 ==================== */
+/*
+ * 240x240 屏幕布局:
+ *   y=0-25:  [WiFi图标] [Cloud图标] (右上角)
+ *   y=10:    "充电棚环境监测" (左上角)
+ *   y=45:    [温度图标] 温度值         [湿度图标] 湿度值
+ *   y=85:    [光照图标] 光照值         [PM2.5图标] PM2.5值
+ *   y=120:   阈值: XX.X°C
+ *   y=155:                    [主状态图]
+ *   y=190:   "正常"                              [蜂鸣器]
+ */
 static void warehouse_ui_init(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
 
+    /* 顶部栏 */
     img_wifi_status = lv_img_create(scr);
     lv_img_set_src(img_wifi_status, &connected);
     lv_obj_align(img_wifi_status, LV_ALIGN_TOP_RIGHT, -5, 5);
@@ -232,11 +277,12 @@ static void warehouse_ui_init(void)
     lv_obj_align_to(img_cloud_status, img_wifi_status, LV_ALIGN_OUT_LEFT_MID, -5, 0);
 
     lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_font(title, &my_font_cn_16, 0);
+    lv_obj_set_style_text_font(title, &font, 0);
     lv_obj_set_style_text_color(title, lv_color_black(), 0);
     lv_label_set_text(title, "充电棚环境监测");
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
 
+    /* 第一行: 温度 (左) + 湿度 (右) */
     lv_obj_t *img_temp = lv_img_create(scr);
     lv_img_set_src(img_temp, &Environmental);
     lv_obj_align(img_temp, LV_ALIGN_TOP_LEFT, 15, 45);
@@ -249,7 +295,7 @@ static void warehouse_ui_init(void)
 
     lv_obj_t *img_humi = lv_img_create(scr);
     lv_img_set_src(img_humi, &waterprof);
-    lv_obj_align(img_humi, LV_ALIGN_RIGHT_MID, -15, -60);
+    lv_obj_align(img_humi, LV_ALIGN_TOP_RIGHT, -15, 45);
 
     label_humi_val = lv_label_create(scr);
     lv_obj_set_style_text_font(label_humi_val, &lv_font_montserrat_18, 0);
@@ -257,6 +303,7 @@ static void warehouse_ui_init(void)
     lv_label_set_text(label_humi_val, "--.-- %");
     lv_obj_align_to(label_humi_val, img_humi, LV_ALIGN_OUT_LEFT_MID, -10, 0);
 
+    /* 第二行: 光照 (左) + PM2.5 (右) */
     lv_obj_t *img_light = lv_img_create(scr);
     lv_img_set_src(img_light, &light);
     lv_obj_align(img_light, LV_ALIGN_LEFT_MID, 15, 0);
@@ -267,34 +314,27 @@ static void warehouse_ui_init(void)
     lv_label_set_text(label_light_val, "--- Lux");
     lv_obj_align_to(label_light_val, img_light, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
 
-    lv_obj_t *img_tilt = lv_img_create(scr);
-    lv_img_set_src(img_tilt, &tilt);
-    lv_obj_align(img_tilt, LV_ALIGN_RIGHT_MID, -15, 0);
-
-    label_tilt_x_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_tilt_x_val, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label_tilt_x_val, lv_color_black(), 0);
-    lv_label_set_text(label_tilt_x_val, "X: --.-");
-    lv_obj_align_to(label_tilt_x_val, img_tilt, LV_ALIGN_OUT_LEFT_MID, -5, -10);
-
-    label_tilt_y_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_tilt_y_val, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label_tilt_y_val, lv_color_black(), 0);
-    lv_label_set_text(label_tilt_y_val, "Y: --.-");
-    lv_obj_align_to(label_tilt_y_val, label_tilt_x_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
-
-    label_pm25_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_pm25_val, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(label_pm25_val, lv_color_black(), 0);
-    lv_label_set_text(label_pm25_val, "PM2.5:--");
-    lv_obj_align_to(label_pm25_val, label_tilt_y_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 4);
-
+    /* PM2.5 替代原来的倾角位置 */
     lv_obj_t *img_pm25 = lv_img_create(scr);
     lv_img_set_src(img_pm25, &CO_specific);
-    lv_obj_align_to(img_pm25, label_pm25_val, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+    lv_obj_align(img_pm25, LV_ALIGN_RIGHT_MID, -15, 0);
 
+    label_pm25_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_pm25_val, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label_pm25_val, lv_color_black(), 0);
+    lv_label_set_text(label_pm25_val, "PM2.5:--");
+    lv_obj_align_to(label_pm25_val, img_pm25, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+
+    /* 阈值 — 光照下方独立一行 */
+    label_threshold_val = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_threshold_val, &font, 0);
+    lv_obj_set_style_text_color(label_threshold_val, lv_color_hex(0x0000FF), 0);
+    lv_label_set_text(label_threshold_val, "阈值:80.0C");
+    lv_obj_align_to(label_threshold_val, label_light_val, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+
+    /* 底部栏 */
     label_alarm_status = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_alarm_status, &my_font_cn_16, 0);
+    lv_obj_set_style_text_font(label_alarm_status, &font, 0);
     lv_obj_set_style_text_color(label_alarm_status, lv_color_black(), 0);
     lv_label_set_text(label_alarm_status, "正常");
     lv_obj_align(label_alarm_status, LV_ALIGN_BOTTOM_LEFT, 10, -10);
@@ -308,18 +348,8 @@ static void warehouse_ui_init(void)
     lv_obj_add_flag(img_beep_status, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(img_beep_status, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
-    label_threshold_val = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_threshold_val, &my_font_cn_16, 0);
-    lv_obj_set_style_text_color(label_threshold_val, lv_color_hex(0x0000FF), 0);
-    update_threshold_display();
-    lv_obj_align_to(label_threshold_val, label_light_val, LV_ALIGN_OUT_BOTTOM_MID, 0, 25);
-
-    /*
-     * [静态显示模式] 注册 lv_timer 周期性刷新回调
-     * 注释后 UI 仅初始化一次，不周期性刷新，节省 CPU 和堆内存
-     * 后续启用时取消注释此句即可恢复动态更新
-     */
     lv_timer_create(lv_ui_refresh_task, 200, NULL);
+    LOG_I(TAG, "UI init done (LVGL thread will render automatically)");
 }
 
 /* ==================== main 函数 ==================== */
@@ -332,16 +362,17 @@ int main(void)
     rt_pin_write(LED_R_PIN, PIN_HIGH);
 
     /*
-     * LVGL 初始化 + UI 创建 — 在 scheduler 启动前完成，单线程安全。
-     * lv_port_disp_init() 内部创建 "LVGL" 线程(prio 20, 8KB) 负责 lv_timer_handler()。
-     * warehouse_ui_init() 注册 lv_timer 回调，后续由 LVGL 线程安全调用。
-     * ⚠ 不再创建独立的 display 线程 — 避免双线程 LVGL 竞态导致 Hard Fault。
+     * LVGL 初始化 + UI 创建。
+     * lv_rt_thread_port.c 在 INIT_ENV_EXPORT 阶段创建 "LVGL" 线程(prio 20, 3KB)，
+     * 该线程在 lv_init() 后开始调用 lv_timer_handler()。
+     * ⚠ lv_refr_now() 会导致与 LVGL 线程竞态 → HardFault，禁止在 main 线程调用！
      */
-    rt_kprintf("[main] Initializing LVGL...\n");
+    LOG_I(TAG, "Initializing LVGL...");
     lv_init();
     lv_port_disp_init();
+
     warehouse_ui_init();
-    rt_kprintf("[main] LVGL OK\n");
+    LOG_I(TAG, "LVGL OK");
 
     /*
      * ——— RT-Thread 对象创建 & 模块启动 ———
@@ -350,20 +381,22 @@ int main(void)
     app_sensor_init();
     app_net_init();
 
+    watchdog_init();
+
     print_memory("modules_started");
 
     /* ——— 连接 WiFi ——— */
-    rt_kprintf("[main] Delaying 3s for system stabilization...\n");
+    LOG_I(TAG, "Delaying 3s for system stabilization...");
     rt_thread_mdelay(3000);
 
     int ret = wifi_connect();
     if (ret != 0)
     {
-        rt_kprintf("[main] WiFi connection failed!\n");
+        LOG_E(TAG, "WiFi connection failed!");
     }
     else
     {
-        rt_kprintf("[main] WiFi connected, starting OneNET...\n");
+        LOG_I(TAG, "WiFi connected, starting OneNET...");
         rt_thread_mdelay(2000);
         app_net_onenet_start();
     }
@@ -379,7 +412,7 @@ int main(void)
             heartbeat++;
             rt_pin_write(LED_R_PIN, (heartbeat & 1) ? PIN_LOW : PIN_HIGH);
             rt_memory_info(&total, &used, &max_used);
-            rt_kprintf("[HB] tick=%d used=%u/%u KB\n",
+            LOG_D(TAG, "HB tick=%d used=%u/%u KB",
                        heartbeat, used / 1024, total / 1024);
         }
     }

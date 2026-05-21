@@ -1,4 +1,5 @@
 #include "app_logic.h"
+#include "app_net.h"
 #include <board.h>
 #include <rtdevice.h>
 #include <stdio.h>
@@ -18,6 +19,8 @@
  *      实现线程间异步通知，避免轮询浪费 CPU。
  *   3. 共享资源封装：将分散的全局变量封装到 struct app_state 中统一管理。
  */
+
+#define TAG "logic"
 
 /* ==================== 引脚定义 ==================== */
 #define BEEP_PIN        GET_PIN(B, 0)       // 蜂鸣器 (高电平响)
@@ -51,10 +54,10 @@ rt_mutex_t data_lock = RT_NULL;
  *   封装为单一结构体，便于互斥量统一保护。
  */
 struct app_state g_app_state = {
-    .temp_threshold  = 55.0f,
-    .pm25_threshold  = 75.0f,
-    .flame_threshold = 300,
-    .mq2_threshold   = 500,
+    .temp_threshold  = 80.0f,
+    .pm25_threshold  = 200.0f,
+    .flame_threshold = 800,
+    .mq2_threshold   = 1500,
     .beep_status     = 0,
     .alarm_type      = 0,
     .alarm_state     = 0,
@@ -92,7 +95,7 @@ static int servo_init(void)
     servo_pwm_dev = (struct rt_device_pwm *)rt_device_find(SERVO_PWM_DEV);
     if (servo_pwm_dev == RT_NULL)
     {
-        rt_kprintf("[logic] Servo: find %s failed!\n", SERVO_PWM_DEV);
+        LOG_E(TAG, "Servo: find %s failed!", SERVO_PWM_DEV);
         return -1;
     }
 
@@ -100,7 +103,7 @@ static int servo_init(void)
     rt_pwm_enable(servo_pwm_dev, SERVO_PWM_CHANNEL);
 
     servo_last_angle = SERVO_ANGLE_MIN;
-    rt_kprintf("[logic] Servo: initialized on %s channel %d\n", SERVO_PWM_DEV, SERVO_PWM_CHANNEL);
+    LOG_I(TAG, "Servo: initialized on %s channel %d", SERVO_PWM_DEV, SERVO_PWM_CHANNEL);
     return 0;
 }
 
@@ -113,7 +116,7 @@ static void servo_set_angle(int angle)
     uint32_t pulse_ns = SERVO_MIN_PULSE_NS + (uint32_t)((uint32_t)angle * (SERVO_MAX_PULSE_NS - SERVO_MIN_PULSE_NS) / SERVO_ANGLE_MAX);
     rt_pwm_set(servo_pwm_dev, SERVO_PWM_CHANNEL, SERVO_PERIOD_NS, pulse_ns);
     servo_last_angle = angle;
-    rt_kprintf("[logic] Servo: set angle %d\n", angle);
+    LOG_I(TAG, "Servo: set angle %d", angle);
 }
 
 /* ==================== BEEP 控制 ==================== */
@@ -145,6 +148,7 @@ void beep_set(uint8_t on)
 void logic_handle(float temperature)
 {
     int should_alarm = 0;
+    static int was_temp_alarm = 0;
 
     while (rt_mutex_take(data_lock, RT_WAITING_NO) != RT_EOK)
         rt_thread_mdelay(1);
@@ -156,9 +160,7 @@ void logic_handle(float temperature)
     {
         should_alarm = 1;
         g_app_state.alarm_state = 1;
-        rt_kprintf("[logic] Temp %d.%d > threshold %d.%d, ALARM\n",
-                   (int)temperature, abs((int)((temperature - (int)temperature) * 10)),
-                   (int)threshold, abs((int)((threshold - (int)threshold) * 10)));
+        LOG_W(TAG, "Temp %.1f > threshold %.1f, ALARM", temperature, threshold);
     }
     else
     {
@@ -170,23 +172,22 @@ void logic_handle(float temperature)
     if (should_alarm)
     {
         rt_event_send(&evt_alarm, EVENT_TEMP_ALARM);
+        was_temp_alarm = 1;
     }
-    else
+    else if (was_temp_alarm)
     {
         rt_event_send(&evt_alarm, EVENT_ALARM_CLEAR);
+        was_temp_alarm = 0;
     }
 }
 
 /* ==================== CC2530环境数据判定 ==================== */
 /*
- * logic_handle_cc2530:
- *   电动车充电棚场景专属判定：
- *     PM2.5 > 75  → 空气污染告警（扬尘/烟雾）
- *     MQ2 > 500   → 可燃气体/烟雾告警（电池热失控前兆）
- *     Flame < 300 → 火焰告警（明火，值越低越危险）
- *   优先级: 火焰 > 烟雾 > PM2.5
+ * logic_handle_cc2530_env:
+ *   MQ2烟雾 / 火焰传感器告警判定。仅当 CC2530 环境数据有效时调用。
+ *   优先级: 火焰 > 烟雾
  */
-void logic_handle_cc2530(uint16_t pm2_5, uint16_t mq2, uint16_t flame)
+void logic_handle_cc2530_env(uint16_t mq2, uint16_t flame)
 {
     int should_alarm = 0;
     uint8_t alarm_type = 0;
@@ -196,26 +197,19 @@ void logic_handle_cc2530(uint16_t pm2_5, uint16_t mq2, uint16_t flame)
 
     uint16_t flame_th = g_app_state.flame_threshold;
     uint16_t mq2_th = g_app_state.mq2_threshold;
-    float pm25_th = g_app_state.pm25_threshold;
     rt_mutex_release(data_lock);
 
     if (flame < flame_th)
     {
         should_alarm = 1;
         alarm_type = 5;
-        rt_kprintf("[logic] FIRE ALARM! flame=%u < %u\n", flame, flame_th);
+        LOG_W(TAG, "FIRE ALARM! flame=%u < %u", flame, flame_th);
     }
     else if (mq2 > mq2_th)
     {
         should_alarm = 1;
         alarm_type = 4;
-        rt_kprintf("[logic] SMOKE ALARM! mq2=%u > %u\n", mq2, mq2_th);
-    }
-    else if (pm2_5 > (uint16_t)pm25_th)
-    {
-        should_alarm = 1;
-        alarm_type = 6;
-        rt_kprintf("[logic] PM2.5 ALARM! pm2_5=%u > %u\n", pm2_5, (uint16_t)pm25_th);
+        LOG_W(TAG, "SMOKE ALARM! mq2=%u > %u", mq2, mq2_th);
     }
 
     if (should_alarm)
@@ -227,11 +221,47 @@ void logic_handle_cc2530(uint16_t pm2_5, uint16_t mq2, uint16_t flame)
 
         if (alarm_type == 5)
             rt_event_send(&evt_alarm, EVENT_FIRE_ALARM);
-        else if (alarm_type == 4)
-            rt_event_send(&evt_alarm, EVENT_SMOKE_ALARM);
         else
-            rt_event_send(&evt_alarm, EVENT_PM25_ALARM);
+            rt_event_send(&evt_alarm, EVENT_SMOKE_ALARM);
     }
+}
+
+/*
+ * logic_handle_cc2530_pm:
+ *   PM2.5/PM10 颗粒物告警判定。仅当 PM 数据有效时调用。
+ */
+void logic_handle_cc2530_pm(uint16_t pm2_5)
+{
+    int should_alarm = 0;
+
+    while (rt_mutex_take(data_lock, RT_WAITING_NO) != RT_EOK)
+        rt_thread_mdelay(1);
+
+    float pm25_th = g_app_state.pm25_threshold;
+    rt_mutex_release(data_lock);
+
+    if (pm2_5 > (uint16_t)pm25_th)
+    {
+        should_alarm = 1;
+        LOG_W(TAG, "PM2.5 ALARM! pm2_5=%u > %.0f", pm2_5, pm25_th);
+    }
+
+    if (should_alarm)
+    {
+        rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+        g_app_state.alarm_state = 1;
+        g_app_state.alarm_type = 6;
+        rt_mutex_release(data_lock);
+
+        rt_event_send(&evt_alarm, EVENT_PM25_ALARM);
+    }
+}
+
+/* 保留原函数签名以兼容, 内部拆分调用 */
+void logic_handle_cc2530(uint16_t pm2_5, uint16_t mq2, uint16_t flame)
+{
+    logic_handle_cc2530_pm(pm2_5);
+    logic_handle_cc2530_env(mq2, flame);
 }
 
 /* ==================== 逻辑处理线程 ==================== */
@@ -244,20 +274,20 @@ static void logic_thread_entry(void *parameter)
 {
     rt_uint32_t events;
 
-    rt_kprintf("[logic] Logic thread started, waiting for events...\n");
+    LOG_I(TAG, "Logic thread started, waiting for events...");
 
     while (1)
     {
-        /*
-         * 阻塞等待任意告警事件。RT_WAITING_FOREVER 使线程挂起，不消耗 CPU。
-         * 当传感器线程发送事件时，内核唤醒本线程。
-         */
-        if (rt_event_recv(&evt_alarm,
+        rt_err_t evt_ret = rt_event_recv(&evt_alarm,
                           EVENT_ALL,
                           RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
-                          RT_WAITING_FOREVER, &events) == RT_EOK)
+                          1000, &events);
+
+        watchdog_feed();
+
+        if (evt_ret == RT_EOK)
         {
-            rt_mutex_take(data_lock, RT_WAITING_FOREVER);   /* 进入临界区 */
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
 
             if (events & EVENT_FIRE_ALARM)
             {
@@ -266,7 +296,7 @@ static void logic_thread_entry(void *parameter)
                 g_app_state.alarm_type = 5;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
                 servo_set_angle(90);
-                rt_kprintf("[logic] EVENT: FIRE_ALARM -> beep ON, servo 90\n");
+                LOG_W(TAG, "EVENT: FIRE_ALARM -> beep ON, servo 90");
             }
             else if (events & EVENT_SMOKE_ALARM)
             {
@@ -275,13 +305,13 @@ static void logic_thread_entry(void *parameter)
                 g_app_state.alarm_type = 4;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
                 servo_set_angle(90);
-                rt_kprintf("[logic] EVENT: SMOKE_ALARM -> beep ON, servo 90\n");
+                LOG_W(TAG, "EVENT: SMOKE_ALARM -> beep ON, servo 90");
             }
             else if (events & EVENT_PM25_ALARM)
             {
                 g_app_state.alarm_state = 1;
                 g_app_state.alarm_type = 6;
-                rt_kprintf("[logic] EVENT: PM25_ALARM -> alert only\n");
+                LOG_I(TAG, "EVENT: PM25_ALARM -> alert only");
             }
             else if (events & EVENT_TEMP_ALARM)
             {
@@ -290,20 +320,20 @@ static void logic_thread_entry(void *parameter)
                 g_app_state.alarm_type = 1;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
                 servo_set_angle(90);
-                rt_kprintf("[logic] EVENT: TEMP_ALARM -> beep ON, servo 90\n");
+                LOG_W(TAG, "EVENT: TEMP_ALARM -> beep ON, servo 90");
             }
             else if (events & EVENT_TILT_ALARM)
             {
                 g_app_state.alarm_state = 1;
                 g_app_state.alarm_type = 2;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
-                rt_kprintf("[logic] EVENT: TILT_ALARM -> beep ON\n");
+                LOG_W(TAG, "EVENT: TILT_ALARM -> beep ON");
             }
             else if (events & EVENT_VIBRATION_ALARM)
             {
                 g_app_state.alarm_state = 1;
                 g_app_state.alarm_type = 3;
-                rt_kprintf("[logic] EVENT: VIBRATION_ALARM\n");
+                LOG_I(TAG, "EVENT: VIBRATION_ALARM");
             }
             else if (events & EVENT_ALARM_CLEAR)
             {
@@ -314,7 +344,7 @@ static void logic_thread_entry(void *parameter)
                 servo_set_angle(0);
             }
 
-            rt_mutex_release(data_lock);                     /* 退出临界区 */
+            rt_mutex_release(data_lock);
         }
     }
 }
@@ -349,30 +379,30 @@ void process_key_events(void)
     if (flags == 0) return;
     key_event_flags = 0;
 
-    rt_mutex_take(data_lock, RT_WAITING_FOREVER);           /* 进入临界区 */
-
-    if (flags & KEY_EVENT_WKUP_SHORT)
+    if (flags & (KEY_EVENT_WKUP_SHORT | KEY_EVENT_DOWN))
     {
-        g_app_state.temp_threshold += 0.5f;
-        if (g_app_state.temp_threshold > 80.0f)
-            g_app_state.temp_threshold = 80.0f;
-        rt_kprintf("[key] WK_UP: threshold +0.5 -> %d.%d\n",
-                   (int)g_app_state.temp_threshold,
-                   abs((int)((g_app_state.temp_threshold - (int)g_app_state.temp_threshold) * 10)));
-    }
-    if (flags & KEY_EVENT_DOWN)
-    {
-        g_app_state.temp_threshold -= 0.5f;
-        if (g_app_state.temp_threshold < 20.0f)
-            g_app_state.temp_threshold = 20.0f;
-        rt_kprintf("[key] DOWN: threshold -0.5 -> %d.%d\n",
-                   (int)g_app_state.temp_threshold,
-                   abs((int)((g_app_state.temp_threshold - (int)g_app_state.temp_threshold) * 10)));
-    }
+        rt_mutex_take(data_lock, RT_WAITING_FOREVER);        /* 进入临界区 */
 
-    rt_mutex_release(data_lock);                             /* 退出临界区 */
+        if (flags & KEY_EVENT_WKUP_SHORT)
+        {
+            g_app_state.temp_threshold += 0.5f;
+            if (g_app_state.temp_threshold > 80.0f)
+                g_app_state.temp_threshold = 80.0f;
+            LOG_I(TAG, "WK_UP: threshold +0.5 -> %.1f", g_app_state.temp_threshold);
+        }
+        if (flags & KEY_EVENT_DOWN)
+        {
+            g_app_state.temp_threshold -= 0.5f;
+            if (g_app_state.temp_threshold < 20.0f)
+                g_app_state.temp_threshold = 20.0f;
+            LOG_I(TAG, "DOWN: threshold -0.5 -> %.1f", g_app_state.temp_threshold);
+        }
 
-    update_threshold_display();
+        rt_mutex_release(data_lock);                          /* 退出临界区 */
+
+        update_threshold_display();
+        publish_temp_threshold();                             /* 同步到 OneNET */
+    }
 }
 
 /* ==================== 阈值LCD显示更新（弱符号，由main.c重写）==================== */
@@ -391,7 +421,7 @@ static void app_key_init(void)
     rt_pin_attach_irq(KEY_DOWN, PIN_IRQ_MODE_FALLING, key_down_callback, RT_NULL);
     rt_pin_irq_enable(KEY_DOWN, PIN_IRQ_ENABLE);
 
-    rt_kprintf("[logic] Key init done (WK_UP=PC5, DOWN=PC4)\n");
+    LOG_I(TAG, "Key init done (WK_UP=PC5, DOWN=PC4)");
 }
 
 /* ==================== CC2530 数据解析 ==================== */
@@ -407,20 +437,36 @@ static void app_key_init(void)
  */
 static void cc2530_parse_line(const char *line)
 {
-    uint16_t pm1_0, pm2_5, pm10;
-    uint16_t adc0, mq2, flame;
-    char addr[16];
+    uint16_t pm1_0 = 0, pm2_5 = 0, pm10 = 0;
+    uint16_t adc0 = 0, mq2 = 0, flame = 0;
+    char addr[16] = {0};
+    static rt_tick_t last_pm_log_tick;
+    rt_tick_t now = rt_tick_get();
+    int line_len;
 
-    if (strlen(line) == 0) return;
+    if (line == RT_NULL) return;
+
+    line_len = (int)strlen(line);
+    if (line_len < 8)
+    {
+        LOG_W(TAG, "RX too short (%dB), dropped", line_len);
+        return;
+    }
 
     /* 格式1: [COORD] ADC: ADC0=143(0.12V) */
     if (strstr(line, "[COORD] ADC:") == line)
     {
-        if (sscanf(line, "[COORD] ADC: ADC0=%hu", &adc0) == 1)
+        int n = sscanf(line, "[COORD] ADC: ADC0=%hu", &adc0);
+        if (n != 1)
         {
-            g_cc2530_data.coord_adc0 = adc0;
-            g_cc2530_data.coord_adc_valid = 1;
-            rt_kprintf("[cc2530] Coord ADC: %hu\n", adc0);
+            LOG_W(TAG, "Parse COORD_ADC failed (sscanf ret=%d)", n);
+            return;
+        }
+        g_cc2530_data.coord_adc0 = adc0;
+        g_cc2530_data.coord_adc_valid = 1;
+        if (now - last_pm_log_tick > 3000) {
+            LOG_D(TAG, "Coord ADC: %hu", adc0);
+            last_pm_log_tick = now;
         }
         return;
     }
@@ -428,15 +474,25 @@ static void cc2530_parse_line(const char *line)
     /* 格式2: [COORD] RX [END0x38A1] PMS7003: PM1.0=21 PM2.5=32 PM10=37 */
     if (strstr(line, "[COORD] RX [") == line && strstr(line, "PMS7003:"))
     {
-        if (sscanf(line, "[COORD] RX [%15[^]]] PMS7003: PM1.0=%hu PM2.5=%hu PM10=%hu",
-                   addr, &pm1_0, &pm2_5, &pm10) == 4)
+        int n = sscanf(line, "[COORD] RX [%15[^]]] PMS7003: PM1.0=%hu PM2.5=%hu PM10=%hu",
+                       addr, &pm1_0, &pm2_5, &pm10);
+        if (n != 4)
         {
-            g_cc2530_data.pm.pm1_0 = pm1_0;
-            g_cc2530_data.pm.pm2_5 = pm2_5;
-            g_cc2530_data.pm.pm10 = pm10;
-            g_cc2530_data.pm.last_update_tick = rt_tick_get();
-            g_cc2530_data.pm.valid = 1;
-            rt_kprintf("[cc2530] PM from %s: %hu,%hu,%hu\n", addr, pm1_0, pm2_5, pm10);
+            LOG_W(TAG, "Parse PMS7003 failed (sscanf ret=%d, need 4)", n);
+            return;
+        }
+
+        rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+        g_cc2530_data.pm.pm1_0 = pm1_0;
+        g_cc2530_data.pm.pm2_5 = pm2_5;
+        g_cc2530_data.pm.pm10 = pm10;
+        g_cc2530_data.pm.last_update_tick = now;
+        g_cc2530_data.pm.valid = 1;
+        rt_mutex_release(data_lock);
+
+        if (now - last_pm_log_tick > 3000) {
+            LOG_I(TAG, "PM from %s: %hu,%hu,%hu", addr, pm1_0, pm2_5, pm10);
+            last_pm_log_tick = now;
         }
         return;
     }
@@ -444,18 +500,25 @@ static void cc2530_parse_line(const char *line)
     /* 格式3: [COORD] RX [END0x7CD0] ADC0=145 MQ2=281 Flame=2038 */
     if (strstr(line, "[COORD] RX [") == line && strstr(line, "ADC0="))
     {
-        if (sscanf(line, "[COORD] RX [%15[^]]] ADC0=%hu MQ2=%hu Flame=%hu",
-                   addr, &adc0, &mq2, &flame) == 4)
+        int n = sscanf(line, "[COORD] RX [%15[^]]] ADC0=%hu MQ2=%hu Flame=%hu",
+                       addr, &adc0, &mq2, &flame);
+        if (n != 4)
         {
-            strncpy(g_cc2530_data.env.end_addr, addr, sizeof(g_cc2530_data.env.end_addr) - 1);
-            g_cc2530_data.env.adc0 = adc0;
-            g_cc2530_data.env.mq2 = mq2;
-            g_cc2530_data.env.flame = flame;
-            g_cc2530_data.env.last_update_tick = rt_tick_get();
-            g_cc2530_data.env.valid = 1;
-            rt_kprintf("[cc2530] Env from %s: ADC=%hu MQ2=%hu Flame=%hu\n",
-                       addr, adc0, mq2, flame);
+            LOG_W(TAG, "Parse ENV failed (sscanf ret=%d, need 4)", n);
+            return;
         }
+
+        rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+        strncpy(g_cc2530_data.env.end_addr, addr, sizeof(g_cc2530_data.env.end_addr) - 1);
+        g_cc2530_data.env.end_addr[sizeof(g_cc2530_data.env.end_addr) - 1] = '\0';
+        g_cc2530_data.env.adc0 = adc0;
+        g_cc2530_data.env.mq2 = mq2;
+        g_cc2530_data.env.flame = flame;
+        g_cc2530_data.env.last_update_tick = now;
+        g_cc2530_data.env.valid = 1;
+        rt_mutex_release(data_lock);
+
+        LOG_I(TAG, "Env from %s: ADC=%hu MQ2=%hu Flame=%hu", addr, adc0, mq2, flame);
         return;
     }
 
@@ -463,60 +526,106 @@ static void cc2530_parse_line(const char *line)
     if (line[0] == '[' && strstr(line, "END") == line + 1)
     {
         /* 尝试5字段: PM1.0,PM2.5,PM10,MQ2,Flame */
-        if (sscanf(line, "[%15[^]]] %hu,%hu,%hu,%hu,%hu",
-                   addr, &pm1_0, &pm2_5, &pm10, &mq2, &flame) == 6)
+        int n = sscanf(line, "[%15[^]]] %hu,%hu,%hu,%hu,%hu",
+                       addr, &pm1_0, &pm2_5, &pm10, &mq2, &flame);
+        if (n == 6)
         {
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
             g_cc2530_data.pm.pm1_0 = pm1_0;
             g_cc2530_data.pm.pm2_5 = pm2_5;
             g_cc2530_data.pm.pm10 = pm10;
-            g_cc2530_data.pm.last_update_tick = rt_tick_get();
+            g_cc2530_data.pm.last_update_tick = now;
             g_cc2530_data.pm.valid = 1;
             strncpy(g_cc2530_data.env.end_addr, addr, sizeof(g_cc2530_data.env.end_addr) - 1);
+            g_cc2530_data.env.end_addr[sizeof(g_cc2530_data.env.end_addr) - 1] = '\0';
             g_cc2530_data.env.mq2 = mq2;
             g_cc2530_data.env.flame = flame;
-            g_cc2530_data.env.last_update_tick = rt_tick_get();
+            g_cc2530_data.env.last_update_tick = now;
             g_cc2530_data.env.valid = 1;
-            rt_kprintf("[cc2530] CSV from %s: PM=%hu,%hu,%hu MQ2=%hu Flame=%hu\n",
-                       addr, pm1_0, pm2_5, pm10, mq2, flame);
+            rt_mutex_release(data_lock);
+
+            LOG_I(TAG, "CSV from %s: PM=%hu,%hu,%hu MQ2=%hu Flame=%hu",
+                  addr, pm1_0, pm2_5, pm10, mq2, flame);
             return;
         }
+
         /* 兼容3字段: [END0xXXXX] PM1.0,PM2.5,PM10 */
-        if (sscanf(line, "[%15[^]]] %hu,%hu,%hu",
-                   addr, &pm1_0, &pm2_5, &pm10) == 4)
+        n = sscanf(line, "[%15[^]]] %hu,%hu,%hu", addr, &pm1_0, &pm2_5, &pm10);
+        if (n == 4)
         {
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
             g_cc2530_data.pm.pm1_0 = pm1_0;
             g_cc2530_data.pm.pm2_5 = pm2_5;
             g_cc2530_data.pm.pm10 = pm10;
-            g_cc2530_data.pm.last_update_tick = rt_tick_get();
+            g_cc2530_data.pm.last_update_tick = now;
             g_cc2530_data.pm.valid = 1;
-            rt_kprintf("[cc2530] PM from %s: %hu,%hu,%hu\n", addr, pm1_0, pm2_5, pm10);
+            rt_mutex_release(data_lock);
+
+            if (now - last_pm_log_tick > 3000) {
+                LOG_I(TAG, "PM from %s: %hu,%hu,%hu", addr, pm1_0, pm2_5, pm10);
+                last_pm_log_tick = now;
+            }
+            return;
         }
+
+        LOG_W(TAG, "Parse CSV failed (sscanf ret=%d), raw: %.40s", n, line);
         return;
     }
 
     /* 格式5(旧): 纯CSV — "PM1.0,PM2.5,PM10" 向后兼容 */
-    if (sscanf(line, "%hu,%hu,%hu", &pm1_0, &pm2_5, &pm10) == 3)
     {
-        g_cc2530_data.pm.pm1_0 = pm1_0;
-        g_cc2530_data.pm.pm2_5 = pm2_5;
-        g_cc2530_data.pm.pm10 = pm10;
-        g_cc2530_data.pm.last_update_tick = rt_tick_get();
-        g_cc2530_data.pm.valid = 1;
-        rt_kprintf("[cc2530] PM: %hu,%hu,%hu\n", pm1_0, pm2_5, pm10);
+        int n = sscanf(line, "%hu,%hu,%hu", &pm1_0, &pm2_5, &pm10);
+        if (n == 3)
+        {
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+            g_cc2530_data.pm.pm1_0 = pm1_0;
+            g_cc2530_data.pm.pm2_5 = pm2_5;
+            g_cc2530_data.pm.pm10 = pm10;
+            g_cc2530_data.pm.last_update_tick = now;
+            g_cc2530_data.pm.valid = 1;
+            rt_mutex_release(data_lock);
+
+            if (now - last_pm_log_tick > 3000) {
+                LOG_I(TAG, "PM(raw): %hu,%hu,%hu", pm1_0, pm2_5, pm10);
+                last_pm_log_tick = now;
+            }
+            return;
+        }
     }
+
+    LOG_D(TAG, "Unrecognized frame: %.48s", line);
 }
 
 /* ==================== CC2530 串口接收线程（静态分配） ==================== */
-static rt_uint8_t cc2530_rx_stack[1536];
+static rt_uint8_t cc2530_rx_stack[2304];
 static struct rt_thread cc2530_rx_thread;
+static rt_sem_t cc2530_rx_sem = RT_NULL;
+
+/*
+ * cc2530_rx_indicate:
+ *   串口中断回调 — 由 RT-Thread 串口驱动在 ISR 上下文调用。
+ *   仅释放信号量唤醒接收线程，不执行任何阻塞操作。
+ *   体现 ISR → 线程的异步通知模式。
+ */
+static rt_err_t cc2530_rx_indicate(rt_device_t dev, rt_size_t size)
+{
+    if (cc2530_rx_sem != RT_NULL)
+        rt_sem_release(cc2530_rx_sem);
+    return RT_EOK;
+}
+
 /*
  * cc2530_recv_thread:
- *   从 uart3 逐字节读取 CC2530 发来的数据，按行缓冲。
- *   收到 '\n' 时触发行解析，提取传感器数值。
+ *   基于信号量触发的高效串口接收线程。
+ *
+ *   改进前（轮询模式）：rt_device_read(-1) 阻塞等待，栈帧始终活跃。
+ *   改进后（事件驱动）：线程阻塞在 rt_sem_take()，栈休眠；有数据时 ISR
+ *   释放信号量唤醒线程，批量读取所有可用字节。
  *
  *   数据流：
- *     CC2530 --UART(9600bps)--> USART3(PB10/PB11) --> 逐字节读取
- *     --> 行缓冲 --> '\n' 触发解析 --> g_cc2530_data
+ *     CC2530 --UART(9600bps)--> USART3(PB10/PB11)
+ *     --> 硬件 RXNE 中断 → 驱动缓冲区 → rx_indicate → sem_release
+ *     --> 线程被唤醒 → 批量读取 → 行缓冲解析 → g_cc2530_data
  */
 static void cc2530_recv_thread(void *parameter)
 {
@@ -524,17 +633,25 @@ static void cc2530_recv_thread(void *parameter)
     char ch;
     uint8_t skip_line = 0;
 
-    rt_kprintf("[cc2530] Receiver thread started\n");
+    LOG_I(TAG, "CC2530 receiver thread started (semaphore mode)");
 
     while (1)
     {
-        if (rt_device_read(serial, -1, &ch, 1) == 1)
+        rt_sem_take(cc2530_rx_sem, RT_WAITING_FOREVER);
+
+        while (rt_device_read(serial, 0, &ch, 1) == 1)
         {
             if (ch == '\n')
             {
-                if (!skip_line)
+                if (!skip_line && g_cc2530_parser.line_pos > 0)
                 {
                     g_cc2530_parser.line_buf[g_cc2530_parser.line_pos] = '\0';
+
+                    if (g_cc2530_parser.line_pos >= 8)
+                    {
+                        LOG_D(TAG, "RX[%d]: %s", g_cc2530_parser.line_pos, g_cc2530_parser.line_buf);
+                    }
+
                     cc2530_parse_line(g_cc2530_parser.line_buf);
                 }
                 g_cc2530_parser.line_pos = 0;
@@ -553,7 +670,7 @@ static void cc2530_recv_thread(void *parameter)
             else
             {
                 skip_line = 1;
-                rt_kprintf("[cc2530] Line too long, skipped (buf=%d)\n", CC2530_LINE_BUF_SIZE);
+                LOG_W(TAG, "Line too long, skipped (buf=%d)", CC2530_LINE_BUF_SIZE);
             }
         }
     }
@@ -575,14 +692,14 @@ void cc2530_serial_init(void)
 
     if (serial == RT_NULL)
     {
-        rt_kprintf("[cc2530] Cannot find device: %s\n", CC2530_UART_DEVICE);
+        LOG_E(TAG, "Cannot find device: %s", CC2530_UART_DEVICE);
         return;
     }
 
     /* 以中断接收模式打开 */
     if (rt_device_open(serial, RT_DEVICE_OFLAG_RDWR | RT_DEVICE_FLAG_INT_RX) != RT_EOK)
     {
-        rt_kprintf("[cc2530] Failed to open %s\n", CC2530_UART_DEVICE);
+        LOG_E(TAG, "Failed to open %s", CC2530_UART_DEVICE);
         return;
     }
 
@@ -592,10 +709,22 @@ void cc2530_serial_init(void)
     config.data_bits = DATA_BITS_8;
     config.stop_bits = STOP_BITS_1;
     config.parity    = PARITY_NONE;
-    config.bufsz     = 64;
+    config.bufsz     = 1024;
     rt_device_control(serial, RT_DEVICE_CTRL_CONFIG, &config);
 
-    rt_kprintf("[cc2530] %s opened at 9600 baud\n", CC2530_UART_DEVICE);
+    /*
+     * 创建信号量 + 注册中断回调 — 实现基于信号量的高效接收。
+     * 串口硬件 RXNE 中断 → 驱动缓冲 → rx_indicate 释放信号量 → 线程消费。
+     */
+    cc2530_rx_sem = rt_sem_create("cc2530_rx", 0, RT_IPC_FLAG_FIFO);
+    if (cc2530_rx_sem == RT_NULL)
+    {
+        LOG_E(TAG, "cc2530_rx sem create failed!");
+        return;
+    }
+    rt_device_set_rx_indicate(serial, cc2530_rx_indicate);
+
+    LOG_I(TAG, "%s opened at 9600 baud", CC2530_UART_DEVICE);
 
     /* 静态创建接收线程（栈不占堆）*/
     rt_thread_init(&cc2530_rx_thread,
@@ -604,9 +733,9 @@ void cc2530_serial_init(void)
                    serial,
                    cc2530_rx_stack,
                    sizeof(cc2530_rx_stack),
-                   24, 10);
+                   12, 10);
     rt_thread_startup(&cc2530_rx_thread);
-    rt_kprintf("[cc2530] Receiver thread started (prio=24, static stack=%d)\n", sizeof(cc2530_rx_stack));
+    LOG_I(TAG, "Receiver thread started (prio=12, static stack=%d)", sizeof(cc2530_rx_stack));
 }
 
 /* ==================== 模块初始化 ==================== */
@@ -627,7 +756,7 @@ void app_logic_init(void)
     data_lock = rt_mutex_create("data_lock", RT_IPC_FLAG_FIFO);
     if (data_lock == RT_NULL)
     {
-        rt_kprintf("[logic] FATAL: mutex create failed!\n");
+        LOG_E(TAG, "mutex create failed!");
         return;
     }
 
@@ -648,14 +777,15 @@ void app_logic_init(void)
     rt_thread_t tid_logic = rt_thread_create("logic",
                                               logic_thread_entry,
                                               RT_NULL,
-                                              2048,
+                                              3072,
                                               8,
                                               10);
     if (tid_logic)
     {
         rt_thread_startup(tid_logic);
-        rt_kprintf("[logic] Init OK T:%.1f PM25:%.0f MQ2:%u Flame:%u\n",
-                   g_app_state.temp_threshold, g_app_state.pm25_threshold,
-                   g_app_state.mq2_threshold, g_app_state.flame_threshold);
+        LOG_I(TAG, "Init OK T:%.1f PM25:%.0f MQ2:%u Flame:%u",
+              g_app_state.temp_threshold,
+              g_app_state.pm25_threshold,
+              g_app_state.mq2_threshold, g_app_state.flame_threshold);
     }
 }
