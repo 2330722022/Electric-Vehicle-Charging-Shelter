@@ -42,9 +42,6 @@
 /* LED引脚 */
 #define LED_R_PIN       GET_PIN(F, 12)
 
-/* 蜂鸣器引脚（与 app_logic.c 一致）*/
-#define BEEP_PIN        GET_PIN(B, 0)
-
 /* ==================== 全局变量 ==================== */
 /*
  * net_ready_sem:
@@ -84,6 +81,8 @@ static volatile uint8_t net_led_pending;
 static volatile uint8_t net_led_on;
 static volatile uint8_t net_beep_pending;
 static volatile uint8_t net_beep_on;
+static volatile uint8_t net_fan_pending;
+static volatile uint8_t net_fan_on;
 static volatile uint8_t net_threshold_pending;
 static volatile float   net_threshold_val;
 
@@ -91,8 +90,8 @@ static volatile float   net_threshold_val;
 
 #define PAYLOAD_BUF_SIZE 512
 
-static float last_valid_temperature = 0.0f;
-static float last_valid_humidity = 0.0f;
+static float last_valid_temperature = -99.0f;
+static float last_valid_humidity = -1.0f;
 
 static int is_valid_json_payload(const char *payload, int len)
 {
@@ -171,8 +170,8 @@ static void post_block_fire_safety(const struct sensor_data *data)
         alarm_state = 1;
     else if (data->vibration_detected)
         alarm_state = 2;
-    else if (data->tilt_alarm)
-        alarm_state = 3;
+    //else if (data->tilt_alarm)     /* 倾倒检测已禁用 */
+    //    alarm_state = 3;
 
     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
     int mq2 = (int)g_cc2530_data.env.mq2;
@@ -340,23 +339,22 @@ static void post_block_status(const struct sensor_data *data)
 
     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
     int beep_val = g_app_state.beep_status;
+    int fan_en_val = g_app_state.fan_en;
     rt_mutex_release(data_lock);
 
     int relay = data->actuator_status ? 1 : 0;
     int fan = data->fan_status ? 1 : 0;
     int vib = data->vibration_detected ? 1 : 0;
-    int tilt_abs = abs((int)data->tilt_angle_x) > abs((int)data->tilt_angle_y)
-                   ? abs((int)data->tilt_angle_x) : abs((int)data->tilt_angle_y);
 
     int len = rt_snprintf(payload, sizeof(payload),
         "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
         "\"beep\":{\"value\":%d},"
         "\"relay\":{\"value\":%d},"
+        "\"fan_en\":{\"value\":%d},"
         "\"fan_status\":{\"value\":%d},"
-        "\"vibration\":{\"value\":%d},"
-        "\"tilt_angle\":{\"value\":%d}"
+        "\"vibration\":{\"value\":%d}"
         "},\"method\":\"thing.property.post\"}",
-        (unsigned long)rt_tick_get(), beep_val, relay, fan, vib, tilt_abs);
+        (unsigned long)rt_tick_get(), beep_val, relay, fan_en_val, fan, vib);
 
     if (len >= (int)sizeof(payload))
     {
@@ -371,7 +369,7 @@ static void post_block_status(const struct sensor_data *data)
 
     rt_err_t ret = onenet_mqtt_publish(MQTT_TOPIC, (uint8_t *)payload, strlen(payload));
     if (ret == 0)
-        LOG_I(TAG, "C(st) beep=%d relay=%d fan=%d vib=%d tilt=%d", beep_val, relay, fan, vib, tilt_abs);
+        LOG_I(TAG, "C(st) beep=%d relay=%d fan_en=%d fan=%d vib=%d", beep_val, relay, fan_en_val, fan, vib);
     else
         LOG_W(TAG, "C(st) FAIL ret=%d", ret);
 }
@@ -747,10 +745,6 @@ static void http_handler_thread(void *parameter)
                 int new_beep = atoi(val_buf);
                 if (new_beep == 0 || new_beep == 1)
                 {
-                    /*
-                     * 通过 beep_set() 操作 BEEP，内部已持有 data_lock 互斥量，
-                     * 确保与逻辑线程/OneNET 下行互斥。
-                     */
                     beep_set((uint8_t)new_beep);
                     char resp[64];
                     rt_snprintf(resp, sizeof(resp),
@@ -765,6 +759,31 @@ static void http_handler_thread(void *parameter)
                 else
                 {
                     const char *resp = "{\"status\":\"error\",\"msg\":\"invalid beep value (0 or 1)\"}";
+                    char header[64];
+                    rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
+                    send(client_fd, header, strlen(header), 0);
+                    send(client_fd, resp, strlen(resp), 0);
+                }
+            }
+            else if (strcmp(type_buf, "fan") == 0)
+            {
+                int new_fan = atoi(val_buf);
+                if (new_fan == 0 || new_fan == 1)
+                {
+                    fan_set((uint8_t)new_fan);
+                    char resp[64];
+                    rt_snprintf(resp, sizeof(resp),
+                                "{\"status\":\"ok\",\"type\":\"fan\",\"value\":%u}",
+                                new_fan);
+                    char header[64];
+                    rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
+                    send(client_fd, header, strlen(header), 0);
+                    send(client_fd, resp, strlen(resp), 0);
+                    LOG_I(TAG, "/api/set fan -> %s", new_fan ? "ON" : "OFF");
+                }
+                else
+                {
+                    const char *resp = "{\"status\":\"error\",\"msg\":\"invalid fan value (0 or 1)\"}";
                     char header[64];
                     rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
                     send(client_fd, header, strlen(header), 0);
@@ -906,7 +925,8 @@ static void onenet_upload_thread_entry(void *parameter)
     int ret = onenet_mqtt_init();
     if (ret != 0)
     {
-        LOG_E(TAG, "MQTT init failed: %d, thread exit", ret);
+        LOG_E(TAG, "MQTT init failed: %d, waking sensor thread before exit", ret);
+        rt_event_send(&sys_event, EVENT_MQTT_OK);
         return;
     }
 
@@ -937,7 +957,9 @@ static void onenet_upload_thread_entry(void *parameter)
         }
         if (conn_wait >= 30)
         {
-            LOG_E(TAG, "PAHO connect timeout!");
+            LOG_E(TAG, "PAHO connect timeout! waking sensor, exiting upload thread");
+            rt_event_send(&sys_event, EVENT_MQTT_OK);
+            return;
         }
     }
 
@@ -956,6 +978,8 @@ static void onenet_upload_thread_entry(void *parameter)
 
     while (1)
     {
+        watchdog_feed();
+
         if (net_led_pending)
         {
             net_led_pending = 0;
@@ -972,6 +996,13 @@ static void onenet_upload_thread_entry(void *parameter)
             rt_pin_write(BEEP_PIN, on ? PIN_HIGH : PIN_LOW);
             rt_mutex_release(data_lock);
             LOG_I(TAG, "Deferred cmd: beep %s", on ? "ON" : "OFF");
+        }
+
+        if (net_fan_pending)
+        {
+            net_fan_pending = 0;
+            fan_set(net_fan_on);
+            LOG_I(TAG, "Deferred cmd: fan %s", net_fan_on ? "ON" : "OFF");
         }
 
         if (net_threshold_pending)
@@ -1153,6 +1184,24 @@ static void onenet_cmd_rsp_cb(uint8_t *recv_data, size_t recv_size,
                     net_beep_on = (*p == 't' || *p == 'T' || *p == '1') ? 1 : 0;
                     net_beep_pending = 1;
                     LOG_I(TAG, "OneNET cmd: beep %s (deferred)", net_beep_on ? "ON" : "OFF");
+                }
+            }
+        }
+
+        /* fan_en 控制 — 纯 volatile 写 */
+        {
+            const char *p = data_str;
+            while (p < scan_end - 9 && strncmp(p, "\"fan_en\":", 9) != 0)
+                p++;
+            if (p < scan_end - 9)
+            {
+                p += 9;
+                while (p < scan_end && *p == ' ') p++;
+                if (p < scan_end)
+                {
+                    net_fan_on = (*p == 't' || *p == 'T' || *p == '1') ? 1 : 0;
+                    net_fan_pending = 1;
+                    LOG_I(TAG, "OneNET cmd: fan_en %s (deferred)", net_fan_on ? "ON" : "OFF");
                 }
             }
         }

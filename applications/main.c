@@ -79,7 +79,7 @@ static void watchdog_init(void)
 #if defined(LV_LVGL_H_INCLUDE_SIMPLE)
     #include "lvgl.h"
 #else
-    #include "lvgl/lvgl.h"/
+    #include "lvgl/lvgl.h"
 #endif
 
 void lv_port_disp_init(void);
@@ -89,7 +89,7 @@ extern const lv_img_dsc_t Environmental;
 extern const lv_img_dsc_t waterprof;
 extern const lv_img_dsc_t light;
 extern const lv_img_dsc_t Alarm;
-extern const lv_img_dsc_t tilt;
+//extern const lv_img_dsc_t tilt;  /* 倾倒检测已禁用 */
 extern const lv_img_dsc_t connected;
 extern const lv_img_dsc_t onenet_upload;
 extern const lv_img_dsc_t Megaphone;
@@ -155,12 +155,12 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
 
     if (refresh_count % diag_interval == 0)
     {
-        int ti = (int)local_data.temperature;
-        int td = abs((int)((local_data.temperature - ti) * 10));
-        int hi = (int)local_data.humidity;
-        int hd = abs((int)((local_data.humidity - hi) * 10));
         LOG_D(TAG, "refresh #%d OK, T=%d.%d H=%d.%d",
-                   refresh_count, ti, td, hi, hd);
+                   refresh_count,
+                   (int)local_data.temperature,
+                   abs((int)((local_data.temperature - (int)local_data.temperature) * 10)),
+                   (int)local_data.humidity,
+                   abs((int)((local_data.humidity - (int)local_data.humidity) * 10)));
     }
 
     /* 温度 */
@@ -191,8 +191,13 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
     if (wifi_connected)
         lv_img_set_src(img_wifi_status, &connected);
 
-    /* 读取业务状态 — 短超时尝试（数据锁由高优先级逻辑线程持有，短暂等待） */
-    if (rt_mutex_take(data_lock, 2) == RT_EOK) {
+    /*
+     * 读取业务状态 — 适度超时（原 2 tick 在高负载下频繁超时导致 LCD 不更新）
+     * data_lock 由高优先级上传线程(prio 15)短临界区持有，通常只持几微秒。
+     * 50 tick 超时足以应对 MQTT publish 等操作的短暂持锁，
+     * 同时避免 LVGL timer 回调被永久阻塞（LVGL 运行在 BSP 主线程中）。
+     */
+    if (rt_mutex_take(data_lock, 50) == RT_EOK) {
         uint8_t beep = g_app_state.beep_status;
         float threshold = g_app_state.temp_threshold;
 
@@ -235,11 +240,12 @@ static void lv_ui_refresh_task(lv_timer_t *timer)
             lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
             lv_label_set_text(label_alarm_status, "温度报警");
             lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_RED), 0);
-        } else if (local_data.tilt_alarm) {
-            lv_img_set_src(img_main_status, &tilt);
-            lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
-            lv_label_set_text(label_alarm_status, "倾倒报警");
-            lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        /* 充电棚场景：固定安装，倾倒检测已禁用 */
+        //} else if (local_data.tilt_alarm) {
+        //    lv_img_set_src(img_main_status, &tilt);
+        //    lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
+        //    lv_label_set_text(label_alarm_status, "倾倒报警");
+        //    lv_obj_set_style_text_color(label_alarm_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
         } else {
             lv_img_set_src(img_main_status, &smart_ev_log);
             lv_obj_set_style_text_color(label_temp_val, lv_color_black(), 0);
@@ -385,14 +391,23 @@ int main(void)
 
     print_memory("modules_started");
 
-    /* ——— 连接 WiFi ——— */
+    /* ——— 连接 WiFi（带重试）——— */
     LOG_I(TAG, "Delaying 3s for system stabilization...");
     rt_thread_mdelay(3000);
 
-    int ret = wifi_connect();
+    int retry = 0;
+    int ret;
+    do {
+        ret = wifi_connect();
+        if (ret == 0) break;
+        retry++;
+        LOG_W(TAG, "WiFi connection failed (attempt %d), retrying in 5s...", retry);
+        rt_thread_mdelay(5000);
+    } while (retry < 3);
+
     if (ret != 0)
     {
-        LOG_E(TAG, "WiFi connection failed!");
+        LOG_E(TAG, "WiFi connection failed after %d attempts!", retry);
     }
     else
     {

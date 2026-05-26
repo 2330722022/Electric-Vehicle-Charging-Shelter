@@ -23,7 +23,6 @@
 #define TAG "logic"
 
 /* ==================== 引脚定义 ==================== */
-#define BEEP_PIN        GET_PIN(B, 0)       // 蜂鸣器 (高电平响)
 #define KEY_WK_UP       GET_PIN(C, 5)       // WK_UP按键 - 增加阈值
 #define KEY_DOWN        GET_PIN(C, 4)       // DOWN按键 - 减少阈值
 
@@ -59,6 +58,7 @@ struct app_state g_app_state = {
     .flame_threshold = 800,
     .mq2_threshold   = 1500,
     .beep_status     = 0,
+    .fan_en          = 0,
     .alarm_type      = 0,
     .alarm_state     = 0,
 };
@@ -132,6 +132,14 @@ void beep_set(uint8_t on)
     g_app_state.beep_status = on;
     rt_pin_write(BEEP_PIN, on ? PIN_HIGH : PIN_LOW);
     rt_mutex_release(data_lock);                     /* 退出临界区 */
+}
+
+void fan_set(uint8_t on)
+{
+    rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+    g_app_state.fan_en = on;
+    rt_pin_write(FAN_PIN, on ? PIN_HIGH : PIN_LOW);
+    rt_mutex_release(data_lock);
 }
 
 /* ==================== 核心逻辑处理 ==================== */
@@ -295,8 +303,9 @@ static void logic_thread_entry(void *parameter)
                 g_app_state.alarm_state = 1;
                 g_app_state.alarm_type = 5;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
+                rt_pin_write(FAN_PIN, PIN_LOW);
                 servo_set_angle(90);
-                LOG_W(TAG, "EVENT: FIRE_ALARM -> beep ON, servo 90");
+                LOG_W(TAG, "EVENT: FIRE_ALARM -> beep ON, fan OFF, servo 90");
             }
             else if (events & EVENT_SMOKE_ALARM)
             {
@@ -304,8 +313,9 @@ static void logic_thread_entry(void *parameter)
                 g_app_state.alarm_state = 1;
                 g_app_state.alarm_type = 4;
                 rt_pin_write(BEEP_PIN, PIN_HIGH);
+                rt_pin_write(FAN_PIN, PIN_LOW);
                 servo_set_angle(90);
-                LOG_W(TAG, "EVENT: SMOKE_ALARM -> beep ON, servo 90");
+                LOG_W(TAG, "EVENT: SMOKE_ALARM -> beep ON, fan OFF, servo 90");
             }
             else if (events & EVENT_PM25_ALARM)
             {
@@ -322,13 +332,14 @@ static void logic_thread_entry(void *parameter)
                 servo_set_angle(90);
                 LOG_W(TAG, "EVENT: TEMP_ALARM -> beep ON, servo 90");
             }
-            else if (events & EVENT_TILT_ALARM)
-            {
-                g_app_state.alarm_state = 1;
-                g_app_state.alarm_type = 2;
-                rt_pin_write(BEEP_PIN, PIN_HIGH);
-                LOG_W(TAG, "EVENT: TILT_ALARM -> beep ON");
-            }
+            /* 充电棚场景：固定安装，倾倒检测已禁用 */
+            //else if (events & EVENT_TILT_ALARM)
+            //{
+            //    g_app_state.alarm_state = 1;
+            //    g_app_state.alarm_type = 2;
+            //    rt_pin_write(BEEP_PIN, PIN_HIGH);
+            //    LOG_W(TAG, "EVENT: TILT_ALARM -> beep ON");
+            //}
             else if (events & EVENT_VIBRATION_ALARM)
             {
                 g_app_state.alarm_state = 1;
@@ -766,6 +777,9 @@ void app_logic_init(void)
     /* 3. 初始化硬件 */
     rt_pin_mode(BEEP_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(BEEP_PIN, PIN_LOW);
+
+    rt_pin_mode(FAN_PIN, PIN_MODE_OUTPUT);
+    rt_pin_write(FAN_PIN, PIN_LOW);
 
     servo_init();
     app_key_init();

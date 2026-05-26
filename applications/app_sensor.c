@@ -11,12 +11,14 @@
 #include "ap3216c.h"
 #include "icm20608.h"
 
+#define TAG "sensor"
+
 /*
  * 模块：传感器采集 (app_sensor.c) — 电动车充电棚环境监测
  * 版本：v2.1 充电棚专版 (事件集同步)
  * 日期：2026-05-20
  * OS 概念体现：
- *   1. 多线程调度 — 采集线程设为优先级22（低于 OneNET 上传15，高于逻辑处理8），
+ *   1. 多线程调度 — 采集线程设为优先级22（低于 OneNET 上传15 和逻辑处理8），
  *      RT-Thread 抢占式调度确保高优先级线程就绪时立即抢占 CPU。
  *   2. 事件集 — 传感器线程启动时阻塞等待 EVENT_MQTT_OK，
  *      确保 MQTT 连接就绪后才开始采集循环，避免告警事件无法上传。
@@ -60,8 +62,9 @@
  */
 
 /* ==================== ICM20608倾斜监测配置 ==================== */
-#define TILT_THRESHOLD     15
-#define TILT_SENSITIVITY   2
+/* 充电棚场景：固定安装，倾倒检测已禁用 */
+//#define TILT_THRESHOLD     15
+//#define TILT_SENSITIVITY   2
 
 /* ==================== 全局变量定义 ==================== */
 struct sensor_data shared_data;
@@ -74,12 +77,8 @@ void *ap3216c_dev = RT_NULL;
 void *icm20608_dev = RT_NULL;
 
 /* ==================== 倾斜角度计算 ==================== */
-/*
- * calculate_tilt_angle:
- *   利用加速度计的三轴分量计算 X/Y 轴倾角。
- *   公式：angle = atan2(垂直分量, 重力方向分量) * 180/π
- *   当 g < 100（接近自由落体）时返回 0，避免异常值。
- */
+/* 充电棚场景：固定安装，倾倒检测已禁用 */
+#if 0
 static void calculate_tilt_angle(rt_int16_t accel_x, rt_int16_t accel_y, rt_int16_t accel_z,
                                   float *angle_x, float *angle_y)
 {
@@ -93,27 +92,26 @@ static void calculate_tilt_angle(rt_int16_t accel_x, rt_int16_t accel_y, rt_int1
     *angle_x = atan2((float)accel_y, (float)accel_z) * 180 / 3.14159f;
     *angle_y = atan2((float)accel_x, (float)accel_z) * 180 / 3.14159f;
 }
+#endif
 
 /* ==================== 传感器采集线程 ==================== */
 /*
  * 优先级说明：
- *   采集线程优先级设为 25（最低），确保不干扰：
- *     - 显示线程(21) — LVGL 需要及时刷新屏幕
- *     - 逻辑线程(16) — 告警响应需要低延迟
+ *   采集线程优先级设为 22（最低），确保不干扰：
+ *     - 显示线程(20) — LVGL 需要及时刷新屏幕
+ *     - 逻辑线程(8) — 告警响应需要低延迟
  *     - Web Server(18) — 网络 I/O 需要及时处理
  *   RT-Thread 抢占式调度确保高优先级线程就绪时立即抢占 CPU。
  */
 static void sensor_thread_entry(void *parameter)
 {
     struct sensor_data data;
-    rt_int16_t accel_x, accel_y, accel_z;
+    //rt_int16_t accel_x, accel_y, accel_z;  /* 倾倒检测已禁用 */
     rt_int16_t gyro_x, gyro_y, gyro_z;
-    static int tilt_warning_count = 0;
+    //static int tilt_warning_count = 0;  /* 倾倒检测已禁用 */
     static int loop_count = 0;
     rt_uint32_t events;
 #define VIBRATION_THRESHOLD 1000
-
-#define TAG "sensor"
 
     LOG_I(TAG, "Thread entry, waiting for EVENT_MQTT_OK...");
     rt_event_recv(&sys_event, EVENT_MQTT_OK,
@@ -176,6 +174,8 @@ static void sensor_thread_entry(void *parameter)
         /* 读取加速度计 + 陀螺仪 (I2C2 — ICM20608) */
         if (icm20608_dev != RT_NULL)
         {
+            /* 充电棚场景：固定安装，倾倒检测已禁用 */
+#if 0
             rt_err_t acc_ret = icm20608_get_accel((icm20608_device_t)icm20608_dev,
                                    &accel_x, &accel_y, &accel_z);
             if (acc_ret == RT_EOK)
@@ -208,6 +208,7 @@ static void sensor_thread_entry(void *parameter)
                 data.tilt_angle_y = 0;
                 data.tilt_alarm = 0;
             }
+#endif
 
             rt_err_t gyro_ret = icm20608_get_gyro((icm20608_device_t)icm20608_dev,
                                   &gyro_x, &gyro_y, &gyro_z);
@@ -266,7 +267,46 @@ static void sensor_thread_entry(void *parameter)
         rt_mutex_take(data_lock, RT_WAITING_FOREVER);
         data.actuator_status = g_app_state.beep_status;
         float local_threshold = g_app_state.temp_threshold;
+        uint8_t fan_en = g_app_state.fan_en;
+        uint8_t alarm_type = g_app_state.alarm_type;
         rt_mutex_release(data_lock);
+
+        /*
+         * 风扇自动策略（优先级从高到低）：
+         *   1. 火灾/烟雾告警 → 强制关闭（安全优先，防止助燃）
+         *   2. 手动使能(fan_en=1) → 强制开启（远程/本地手动控制）
+         *   3. 温度偏高但未达告警 → 自动通风（阈值 - 5°C 为通风触发点）
+         *      - 演示场景：按键将阈值调到 30°C，室温 ~25°C 即触发通风
+         *      - 实际场景：阈值默认 80°C，>75°C 时提前通风散热
+         *   4. 其他情况 → 关闭
+         */
+        {
+            uint8_t fan_final;
+            if (alarm_type == 4 || alarm_type == 5)
+            {
+                fan_final = 0;
+            }
+            else if (fan_en)
+            {
+                fan_final = 1;
+            }
+            else if (data.temperature > local_threshold - 5.0f && data.temperature < local_threshold)
+            {
+                fan_final = 1;
+            }
+            else
+            {
+                fan_final = 0;
+            }
+
+            /* 写 FAN_PIN 前重新加锁：防止与 logic 线程的火灾/烟雾告警竞态 */
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+            if (g_app_state.alarm_type == 4 || g_app_state.alarm_type == 5)
+                fan_final = 0;
+            data.fan_status = fan_final;
+            rt_pin_write(FAN_PIN, fan_final ? PIN_HIGH : PIN_LOW);
+            rt_mutex_release(data_lock);
+        }
 
         /* 更新共享数据 — 临界区保护 */
         rt_mutex_take(data_mutex, RT_WAITING_FOREVER);
@@ -275,7 +315,7 @@ static void sensor_thread_entry(void *parameter)
         /* 构建 /get_status JSON — 供 HTTP/OneNET 零拷贝引用 */
         {
             int alarm_state = (data.temperature > local_threshold)
-                              || data.tilt_alarm || data.vibration_detected;
+                              || /*data.tilt_alarm ||*/ data.vibration_detected;  /* 倾倒检测已禁用 */
             int _th_i = (int)local_threshold;
             int _th_d = (int)((local_threshold - _th_i) * 10);
             if (_th_d < 0) _th_d = -_th_d;

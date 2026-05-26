@@ -9,9 +9,9 @@ struct sensor_data {
     float humidity;
     float light;
     uint16_t proximity;
-    float tilt_angle_x;
-    float tilt_angle_y;
-    int tilt_alarm;
+    //float tilt_angle_x;      /* 充电棚场景：固定安装，倾倒检测已禁用 */
+    //float tilt_angle_y;
+    //int tilt_alarm;
     int vibration_detected;
     int actuator_status;
     int fan_status;

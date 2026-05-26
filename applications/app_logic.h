@@ -51,20 +51,25 @@ struct app_state {
     uint16_t flame_threshold;   /* 火焰阈值(低于此值触发报警) */
     uint16_t mq2_threshold;     /* MQ2烟雾阈值 */
     uint8_t beep_status;        /* 蜂鸣器状态 */
+    uint8_t fan_en;             /* 风扇使能 (0=关闭, 1=通风) */
     uint8_t alarm_type;         /* 告警类型: 0=无 1=温度 2=倾斜 3=振动 4=烟雾 5=火焰 6=PM2.5 */
     int alarm_state;            /* 告警状态 (0/1) */
 };
 
 /* ==================== 告警事件集 ==================== */
 #define EVENT_TEMP_ALARM       (1 << 0)
-#define EVENT_TILT_ALARM       (1 << 1)
+//#define EVENT_TILT_ALARM       (1 << 1)  /* 充电棚场景：固定安装，倾倒检测意义不大，已禁用 */
 #define EVENT_VIBRATION_ALARM  (1 << 2)
 #define EVENT_ALARM_CLEAR      (1 << 3)
 #define EVENT_SMOKE_ALARM      (1 << 4)  /* MQ2烟雾 */ 
 #define EVENT_FIRE_ALARM       (1 << 5)  /* 火焰 */
 #define EVENT_PM25_ALARM       (1 << 6)  /* PM2.5超标 */
-#define EVENT_ALL              (EVENT_TEMP_ALARM | EVENT_TILT_ALARM | EVENT_VIBRATION_ALARM | \
+#define EVENT_ALL              (EVENT_TEMP_ALARM | EVENT_VIBRATION_ALARM | \
                                 EVENT_ALARM_CLEAR | EVENT_SMOKE_ALARM | EVENT_FIRE_ALARM | EVENT_PM25_ALARM)
+
+/* ==================== 引脚定义 ==================== */
+#define BEEP_PIN        GET_PIN(B, 0)
+#define FAN_PIN         GET_PIN(E, 2)
 
 /* ==================== CC2530 ZigBee 数据 ==================== */
 #define CC2530_UART_DEVICE      "uart3"
@@ -129,6 +134,9 @@ void logic_handle_cc2530_pm(uint16_t pm2_5);
 
 /* ==================== BEEP 控制 ==================== */
 void beep_set(uint8_t on);
+
+/* ==================== 风扇控制 ==================== */
+void fan_set(uint8_t on);
 
 /* ==================== 按键事件（仅保留UP/DOWN调整阈值）==================== */
 void process_key_events(void);

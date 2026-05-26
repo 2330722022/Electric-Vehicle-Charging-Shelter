@@ -21,7 +21,7 @@
 | **web** | **18** | 2048 | `app_net.c` | HTTP Server 主 acceptor 线程 |
 | LVGL | 20 | 8192 | BSP 内部 | `lv_timer_handler()` 驱动 GUI 刷新 |
 | **http** (worker) | **23** | 2048 | `app_net.c` | 每个 HTTP 请求的独立处理线程 |
-| **sensor** | **25** | 3072 | `app_sensor.c` | AHT10/AP3216C/ICM20608 周期采集 |
+| **sensor** | **22** | 3072 | `app_sensor.c` | AHT10/AP3216C/ICM20608 周期采集 |
 
 ### 1.2 优先级设计思想
 
@@ -48,7 +48,7 @@ rt_pin_write(BEEP_PIN, PIN_HIGH);
 servo_set_angle(90);
 ```
 
-**为什么传感器采集线程优先级最低（prio=25）？**
+**为什么传感器采集线程优先级最低（prio=22）？**
 
 传感器采集周期为 5 秒（`rt_thread_mdelay(5000)`），这是慢速任务。LVGL 显示需要 20ms 级刷新，HTTP 需要及时响应 Android 轮询。将传感器设为最低优先级，意味着**只要任何高优先级线程就绪，传感器立即让出 CPU**——这就是"优先级反转防护"的正面设计。
 
@@ -58,7 +58,7 @@ servo_set_angle(90);
 main() 启动顺序
   │
   ├─ app_logic_init()      → 创建 data_lock + evt_alarm → 启动 logic(prio=8)
-  ├─ app_sensor_init()     → 创建 data_mutex → 启动 sensor(prio=25)
+  ├─ app_sensor_init()     → 创建 data_mutex → 启动 sensor(prio=22)
   └─ app_net_init()        → 创建 net_ready_sem → 启动 web(prio=18)
                               ↓ (WiFi 连接后)
                            app_net_onenet_start() → 启动 onenet(prio=15)
@@ -174,7 +174,7 @@ rt_sem_release(net_ready_sem);  // 消费者2: OneNET 上传
 **生产者-消费者模式：**
 
 ```
-生产者 (传感器线程, prio=25)
+生产者 (传感器线程, prio=22)
   ├─ 温度过高 → rt_event_send(&evt_alarm, EVENT_TEMP_ALARM)
   ├─ 倾斜超限 → rt_event_send(&evt_alarm, EVENT_TILT_ALARM)
   └─ 振动异常 → rt_event_send(&evt_alarm, EVENT_VIBRATION_ALARM)
@@ -281,7 +281,7 @@ else if (strcmp(type_buf, "beep") == 0) {
 **完整链路（5步）：**
 
 ```
-[1] sensor 线程 (prio=25) — 每5秒采集
+[1] sensor 线程 (prio=22) — 每5秒采集
     ├─ aht10_read_temperature()  → temperature=42.5°C
     ├─ icm20608_get_accel()      → tilt_angle
     └─ ap3216c_read_ambient_light() → light
@@ -291,7 +291,7 @@ else if (strcmp(type_buf, "beep") == 0) {
     └─ rt_event_send(&evt_alarm, EVENT_TEMP_ALARM)  ← 发送事件
 [3] 内核调度器
     └─ 检测到 logic 线程 (prio=8) 事件就绪
-    └─ 立即抢占当前 sensor 线程 (prio=25)
+    └─ 立即抢占当前 sensor 线程 (prio=22)
     └─ 切换上下文到 logic 线程
 [4] logic 线程 (prio=8) — 几乎零延迟响应
     ├─ rt_event_recv() 返回 EVENT_TEMP_ALARM
@@ -320,7 +320,52 @@ void logic_handle(float temperature) {
 }
 ```
 
-**核心看点：从传感器采集到 GPIO 翻转，延迟仅取决于线程切换时间（通常 < 50μs），这是裸机大循环无法做到的。**
+### 3.3 风扇控制流：云端下发 → 风扇启停 + 自动策略
+
+风扇控制是本系统新增的关键功能，涉及三种控制来源：云端下行、HTTP本地控制、传感器自动策略，最终由 `fan_set()` 函数统一操作硬件。
+
+**完整链路（云端下发，7步）：**
+
+```
+[1] OneNET 云端 / Android App
+    └─ 下发 JSON: {"fan_en": true}
+[2] paho_mqtt 内部线程 (prio=10)
+    └─ 收到 MQTT PUBLISH → 调用 onenet_cmd_rsp_cb()
+[3] onenet_cmd_rsp_cb() — ISR 安全回调
+    └─ 解析 JSON 中 "fan_en" 字段
+    └─ net_fan_pending = 1 (volatile 标志位写)  ← 不阻塞，不调 mutex
+    └─ net_fan_on = (value == true) ? 1 : 0
+[4] onenet 上传线程 (prio=15) — 消费标志位
+    └─ 检测到 net_fan_pending == 1
+    └─ net_fan_pending = 0
+    └─ 调用 fan_set(net_fan_on)  ← 安全上下文，可阻塞
+[5] fan_set() 函数
+    └─ rt_mutex_take(data_lock, RT_WAITING_FOREVER)
+    └─ g_app_state.fan_en = on       ← 写入共享状态
+    └─ rt_pin_write(FAN_PIN, PIN_HIGH) ← GPIO 操作：PE2 拉高
+    └─ rt_mutex_release(data_lock)
+[6] PE2 → 继电器 IN → 继电器吸合 → 5V 接通 → 风扇运转
+[7] 传感器线程同步上报 fan_status 到云端
+```
+
+**传感器自动策略（消防优先）：**
+
+```c
+// 文件: app_sensor.c — 每 5 秒执行一次
+if (alarm_type == 4 || alarm_type == 5) {
+    fan_final = 0;              // 烟雾/火焰告警 → 强制关风扇（消防原则）
+} else if (fan_en) {
+    fan_final = 1;              // 手动使能
+} else if (data.temperature > 50.0f && data.temperature < local_threshold) {
+    fan_final = 1;              // 温度偏高但未告警 → 自动通风散热
+} else {
+    fan_final = 0;
+}
+data.fan_status = fan_final;
+rt_pin_write(FAN_PIN, fan_final ? PIN_HIGH : PIN_LOW);
+```
+
+**设计要点**：风扇控制遵循"消防优先"原则——一旦检测到烟雾或火焰，无论手动/自动如何设置，风扇立即强制关闭，防止火势因通风扩大。
 
 ---
 
@@ -330,7 +375,7 @@ void logic_handle(float temperature) {
 
 ### 4.1 抢占式调度消除时序耦合
 
-裸机大循环中，传感器的 5 秒采样周期会阻塞蜂鸣器的紧急响应——如果在 `AHT10_Read()` 的 I2C 等待期间发生了倾斜告警，蜂鸣器必须等传感器读取完成才能响应，延迟在毫秒到秒级不可控。RT-Thread 的多线程抢占调度确保 **`logic` 线程（优先级 8）可以随时打断 `sensor` 线程（优先级 25）**，告警响应延迟确定性降到微秒级。
+裸机大循环中，传感器的 5 秒采样周期会阻塞蜂鸣器的紧急响应——如果在 `AHT10_Read()` 的 I2C 等待期间发生了倾斜告警，蜂鸣器必须等传感器读取完成才能响应，延迟在毫秒到秒级不可控。RT-Thread 的多线程抢占调度确保 **`logic` 线程（优先级 8）可以随时打断 `sensor` 线程（优先级 22）**，告警响应延迟确定性降到微秒级。
 
 ```
 裸机模式: [I2C读取中...|I2C读取中...|...蜂鸣器响应...]  ← 延迟不可控
@@ -352,10 +397,10 @@ RTOS模式: [sensor采集]←抢占→[logic响应(50μs)]→[sensor继续]  ←
 | 文件 | 职责 | 核心函数/对象 |
 |:---|:---|:---|
 | `main.c` | 系统入口、LVGL UI 初始化、模块启动序列 | `lv_ui_refresh_task()` |
-| `app_logic.c` | 业务逻辑中心、BEEP/舵机控制、按键处理 | `data_lock`, `evt_alarm`, `logic_thread_entry()` |
-| `app_logic.h` | 业务状态结构体、事件宏定义 | `struct app_state`, `EVENT_TEMP_ALARM` |
+| `app_logic.c` | 业务逻辑中心、BEEP/舵机/风扇控制、按键处理 | `data_lock`, `evt_alarm`, `logic_thread_entry()` |
+| `app_logic.h` | 业务状态结构体、事件宏定义 | `struct app_state`, `EVENT_TEMP_ALARM`, `fan_set()` |
 | `app_sensor.c` | 传感器采集、共享数据保护 | `data_mutex`, `shared_data`, `sensor_thread_entry()` |
 | `app_sensor.h` | 传感器数据结构声明 | `struct sensor_data` |
-| `app_net.c` | HTTP Server、OneNET 上传/下行、WiFi 管理 | `net_ready_sem`, `web_server_thread_entry()`, `onenet_cmd_rsp_cb()` |
+| `app_net.c` | HTTP Server、OneNET上传/下行(fan_en)、WiFi管理 | `net_ready_sem`, `web_server_thread_entry()`, `onenet_cmd_rsp_cb()` |
 | `app_net.h` | 网络模块接口声明 | `net_ready_sem`, `wifi_connected` |
 | `rtconfig.h` | RT-Thread 内核配置 | `RT_USING_SEMAPHORE`, `RT_USING_MUTEX`, `RT_USING_EVENT` |
