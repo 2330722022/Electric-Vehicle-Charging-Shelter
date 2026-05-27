@@ -83,6 +83,8 @@ static volatile uint8_t net_beep_pending;
 static volatile uint8_t net_beep_on;
 static volatile uint8_t net_fan_pending;
 static volatile uint8_t net_fan_on;
+static volatile uint8_t net_servo_pending;
+static volatile int    net_servo_angle;
 static volatile uint8_t net_threshold_pending;
 static volatile float   net_threshold_val;
 
@@ -170,8 +172,6 @@ static void post_block_fire_safety(const struct sensor_data *data)
         alarm_state = 1;
     else if (data->vibration_detected)
         alarm_state = 2;
-    //else if (data->tilt_alarm)     /* 倾倒检测已禁用 */
-    //    alarm_state = 3;
 
     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
     int mq2 = (int)g_cc2530_data.env.mq2;
@@ -340,6 +340,7 @@ static void post_block_status(const struct sensor_data *data)
     rt_mutex_take(data_lock, RT_WAITING_FOREVER);
     int beep_val = g_app_state.beep_status;
     int fan_en_val = g_app_state.fan_en;
+    int servo = g_app_state.servo_angle;
     rt_mutex_release(data_lock);
 
     int relay = data->actuator_status ? 1 : 0;
@@ -350,11 +351,15 @@ static void post_block_status(const struct sensor_data *data)
         "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
         "\"beep\":{\"value\":%d},"
         "\"relay\":{\"value\":%d},"
-        "\"fan_en\":{\"value\":%d},"
-        "\"fan_status\":{\"value\":%d},"
-        "\"vibration\":{\"value\":%d}"
+        "\"fan_en\":{\"value\":%s},"
+        "\"fan_status\":{\"value\":%s},"
+        "\"vibration\":{\"value\":%d},"
+        "\"steeringstatus\":{\"value\":%d}"
         "},\"method\":\"thing.property.post\"}",
-        (unsigned long)rt_tick_get(), beep_val, relay, fan_en_val, fan, vib);
+        (unsigned long)rt_tick_get(), beep_val, relay,
+        fan_en_val ? "true" : "false",
+        fan ? "true" : "false",
+        vib, servo);
 
     if (len >= (int)sizeof(payload))
     {
@@ -369,7 +374,8 @@ static void post_block_status(const struct sensor_data *data)
 
     rt_err_t ret = onenet_mqtt_publish(MQTT_TOPIC, (uint8_t *)payload, strlen(payload));
     if (ret == 0)
-        LOG_I(TAG, "C(st) beep=%d relay=%d fan_en=%d fan=%d vib=%d", beep_val, relay, fan_en_val, fan, vib);
+        LOG_I(TAG, "C(st) beep=%d relay=%d fan_en=%d fan=%d vib=%d servo=%d",
+              beep_val, relay, fan_en_val, fan, vib, servo);
     else
         LOG_W(TAG, "C(st) FAIL ret=%d", ret);
 }
@@ -557,7 +563,7 @@ static void http_handler_thread(void *parameter)
          * 避免嵌套持锁造成死锁。512 字节缓冲区经计算足够容纳所有字段。
          */
         float temperature, humidity, light;
-        int fan_status;
+        int fan_status, servo_angle;
         float temp_threshold, pm25_threshold;
         uint16_t mq2_threshold, flame_threshold;
         uint8_t beep_status, alarm_type;
@@ -568,6 +574,7 @@ static void http_handler_thread(void *parameter)
         humidity    = shared_data.humidity;
         light       = shared_data.light;
         fan_status  = shared_data.fan_status;
+        servo_angle = shared_data.servo_angle;
         rt_mutex_release(data_mutex);
 
         rt_mutex_take(data_lock, RT_WAITING_FOREVER);
@@ -596,11 +603,13 @@ static void http_handler_thread(void *parameter)
         int len = rt_snprintf(json, sizeof(json),
             "{\"alarm_state\":%d,\"alarm_type\":%u,"
             "\"beep\":%u,\"fan_status\":%d,\"work_mode\":%d,"
+            "\"servo_angle\":%d,"
             "\"temperature\":%d.%d,\"humidity\":%d.%d,\"light\":%d,"
             "\"temp_threshold\":%d.%d,\"pm25_threshold\":%d.%d,"
             "\"mq2_threshold\":%u,\"flame_threshold\":%u}",
             alarm_state, alarm_type,
             beep_status, fan_status, 1,
+            servo_angle,
             t_int, t_dec, h_int, h_dec, l_int,
             th_int, th_dec, pm_int, pm_dec,
             mq2_threshold, flame_threshold);
@@ -784,6 +793,31 @@ static void http_handler_thread(void *parameter)
                 else
                 {
                     const char *resp = "{\"status\":\"error\",\"msg\":\"invalid fan value (0 or 1)\"}";
+                    char header[64];
+                    rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
+                    send(client_fd, header, strlen(header), 0);
+                    send(client_fd, resp, strlen(resp), 0);
+                }
+            }
+            else if (strcmp(type_buf, "servo") == 0)
+            {
+                int new_angle = atoi(val_buf);
+                if (new_angle >= 0 && new_angle <= 90)
+                {
+                    servo_set_angle(new_angle);
+                    char resp[64];
+                    rt_snprintf(resp, sizeof(resp),
+                                "{\"status\":\"ok\",\"type\":\"servo\",\"value\":%d}",
+                                new_angle);
+                    char header[64];
+                    rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
+                    send(client_fd, header, strlen(header), 0);
+                    send(client_fd, resp, strlen(resp), 0);
+                    LOG_I(TAG, "/api/set servo -> angle %d", new_angle);
+                }
+                else
+                {
+                    const char *resp = "{\"status\":\"error\",\"msg\":\"invalid servo angle (0-90)\"}";
                     char header[64];
                     rt_snprintf(header, sizeof(header), http_header_200, strlen(resp));
                     send(client_fd, header, strlen(header), 0);
@@ -1005,6 +1039,15 @@ static void onenet_upload_thread_entry(void *parameter)
             LOG_I(TAG, "Deferred cmd: fan %s", net_fan_on ? "ON" : "OFF");
         }
 
+        if (net_servo_pending)
+        {
+            net_servo_pending = 0;
+            rt_mutex_take(data_lock, RT_WAITING_FOREVER);
+            servo_set_angle(net_servo_angle);
+            rt_mutex_release(data_lock);
+            LOG_I(TAG, "Deferred cmd: servo angle %d", net_servo_angle);
+        }
+
         if (net_threshold_pending)
         {
             net_threshold_pending = 0;
@@ -1206,6 +1249,28 @@ static void onenet_cmd_rsp_cb(uint8_t *recv_data, size_t recv_size,
             }
         }
 
+        /* 舵机控制 — 纯 volatile 写 */
+        {
+            const char *p = data_str;
+            while (p < scan_end - 17 && strncmp(p, "\"steeringstatus\":", 17) != 0)
+                p++;
+            if (p < scan_end - 17)
+            {
+                p += 17;
+                while (p < scan_end && *p == ' ') p++;
+                if (p < scan_end)
+                {
+                    int angle = atoi(p);
+                    if (angle >= 0 && angle <= 90)
+                    {
+                        net_servo_angle = angle;
+                        net_servo_pending = 1;
+                        LOG_I(TAG, "OneNET cmd: servo angle %d (deferred)", angle);
+                    }
+                }
+            }
+        }
+
         /* 阈值控制 — 纯 volatile 写 */
         {
             const char *p = data_str;
@@ -1357,17 +1422,17 @@ void app_net_init(void)
 /*
  * app_net_onenet_start:
  *   仅启动 OneNET 上传线程。MQTT 初始化、回调注册由线程自身完成。
- *   线程启动后先阻塞等待 EVENT_WIFI_OK（WiFi 就绪），然后执行 init。
+ *   线程启动后先阻塞等待 EVENT_WIFI_OK 事件（WiFi 就绪），然后执行 init。
  *   这确保了 onenet_mqtt_init() 在正确的线程上下文（而非 main 线程）中运行。
  */
 void app_net_onenet_start(void)
 {
     /*
      * 启动 OneNET 上传线程。
-     * 线程内部会先等待 net_ready_sem 信号量，
+     * 线程内部先阻塞等待 EVENT_WIFI_OK 事件集，
      * 然后初始化 MQTT、注册回调、进入上传循环。
-     * 优先级 15 — 高于传感器(25)和HTTP worker(23)，
-     * 确保下行命令及时消费，同时不抢占逻辑处理(16)。
+     * 优先级 15 — 高于传感器(22)和HTTP worker(23)，
+     * 确保下行命令及时消费，同时不抢占逻辑处理(8)。
      */
     rt_thread_t onenet_thread = rt_thread_create("onenet",
                                                    onenet_upload_thread_entry,

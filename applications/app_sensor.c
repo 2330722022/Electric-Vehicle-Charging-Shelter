@@ -269,7 +269,10 @@ static void sensor_thread_entry(void *parameter)
         float local_threshold = g_app_state.temp_threshold;
         uint8_t fan_en = g_app_state.fan_en;
         uint8_t alarm_type = g_app_state.alarm_type;
+        int servo_angle = g_app_state.servo_angle;
         rt_mutex_release(data_lock);
+
+        data.servo_angle = servo_angle;
 
         /*
          * 风扇自动策略（优先级从高到低）：
@@ -321,8 +324,9 @@ static void sensor_thread_entry(void *parameter)
             if (_th_d < 0) _th_d = -_th_d;
             rt_snprintf(status_json, sizeof(status_json),
                         "{\"alarm_state\":%d,\"beep\":%u,\"fan_status\":%u,"
-                        "\"work_mode\":%d,\"temp_threshold\":%d.%d}",
-                        alarm_state, g_app_state.beep_status, data.fan_status, 1,
+                        "\"servo_angle\":%d,\"work_mode\":%d,\"temp_threshold\":%d.%d}",
+                        alarm_state, g_app_state.beep_status, data.fan_status,
+                        data.servo_angle, 1,
                         _th_i, _th_d);
         }
 
@@ -344,7 +348,7 @@ static void sensor_thread_entry(void *parameter)
  *     1. 创建 data_mutex — 保护 shared_data、status_json
  *     2. 初始化 I2C 总线传感器（AHT10、AP3216C、ICM20608）
  *     3. 校准 ICM20608（消除零偏）
- *     4. 启动采集线程（优先级 25，低优先级）
+ *     4. 启动采集线程（优先级 22，低优先级）
  */
 void app_sensor_init(void)
 {
@@ -381,7 +385,7 @@ void app_sensor_init(void)
         LOG_W(TAG, "ICM20608 init failed");
     }
 
-    /* 4. 启动采集线程 — 优先级22（低于LVGL线程20，高于CC2530接收线程24）*/
+    /* 4. 启动采集线程 — 优先级22（最低优先级，低于所有其他业务线程）*/
     rt_thread_t tid = rt_thread_create("sensor",
                                         sensor_thread_entry,
                                         RT_NULL,
