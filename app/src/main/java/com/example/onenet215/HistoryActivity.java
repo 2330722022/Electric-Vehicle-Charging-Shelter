@@ -28,7 +28,6 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 public class HistoryActivity extends AppCompatActivity {
@@ -37,7 +36,7 @@ public class HistoryActivity extends AppCompatActivity {
     private RecyclerView rvHistoryRecords;
     private TextView tvRecordCount;
     private RecordAdapter adapter;
-    private final Executor ioExecutor = Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
     private final SimpleDateFormat sdf = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
 
     @Override
@@ -54,8 +53,15 @@ public class HistoryActivity extends AppCompatActivity {
         rvHistoryRecords.setLayoutManager(new LinearLayoutManager(this));
         adapter = new RecordAdapter();
         rvHistoryRecords.setAdapter(adapter);
+        rvHistoryRecords.setNestedScrollingEnabled(false);
 
         loadHistoryData();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (ioExecutor != null) ioExecutor.shutdownNow();
     }
 
     private void loadHistoryData() {
@@ -67,8 +73,22 @@ public class HistoryActivity extends AppCompatActivity {
                 tvRecordCount.setText(records.size() + " 条记录");
                 setupChart(records);
                 adapter.setRecords(records);
+                fixRecyclerViewHeight(records.size());
             });
         });
+    }
+
+    private void fixRecyclerViewHeight(int itemCount) {
+        if (itemCount == 0 || adapter.getItemCount() == 0 || rvHistoryRecords.getWidth() == 0) return;
+        View itemView = LayoutInflater.from(this).inflate(R.layout.item_history_record, rvHistoryRecords, false);
+        itemView.measure(
+                View.MeasureSpec.makeMeasureSpec(rvHistoryRecords.getWidth(), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int itemHeight = itemView.getMeasuredHeight();
+        if (itemHeight <= 0) return;
+        ViewGroup.LayoutParams lp = rvHistoryRecords.getLayoutParams();
+        lp.height = itemHeight * itemCount;
+        rvHistoryRecords.setLayoutParams(lp);
     }
 
     private void setupChart(List<SensorRecord> records) {

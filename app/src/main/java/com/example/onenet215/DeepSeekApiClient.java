@@ -22,7 +22,7 @@ import okhttp3.Response;
 public class DeepSeekApiClient {
     private static final String TAG = "DeepSeekApi";
     private static final String API_URL = "https://api.deepseek.com/v1/chat/completions";
-    private static final String API_KEY = "sk-0ca8bd49582245bdb985ef97ca1fafc1";
+    private static final String API_KEY = BuildConfig.DEEPSEEK_API_KEY;
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
     private final OkHttpClient client;
@@ -43,14 +43,30 @@ public class DeepSeekApiClient {
     }
 
     public void chat(String userMessage, DiagnoseCallback callback) {
-        String systemPrompt = "你是一个专业的充电棚消防安全专家助手。请简洁专业地解答用户的消防安全相关问题，"
-                + "回答控制在80字以内，直接给出答案。";
+        chatWithMode(userMessage, false, callback);
+    }
+
+    public void chatWithMode(String userMessage, boolean isProfessional, DiagnoseCallback callback) {
+        String systemPrompt;
+        int maxTokens;
+        double temperature;
+        if (isProfessional) {
+            systemPrompt = "你是一个专业的充电棚消防安全专家助手。请简洁专业地解答用户的消防安全相关问题，"
+                    + "回答控制在80字以内，直接给出答案。";
+            maxTokens = 200;
+            temperature = 0.6;
+        } else {
+            systemPrompt = "你是DeepSeek，一个乐于助人的AI助手。请用中文回答用户的问题，"
+                    + "提供有帮助、准确、详细的回答。";
+            maxTokens = 600;
+            temperature = 0.8;
+        }
 
         try {
             JSONObject body = new JSONObject();
             body.put("model", "deepseek-chat");
-            body.put("max_tokens", 200);
-            body.put("temperature", 0.6);
+            body.put("max_tokens", maxTokens);
+            body.put("temperature", temperature);
 
             JSONArray messages = new JSONArray();
 

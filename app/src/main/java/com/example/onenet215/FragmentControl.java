@@ -28,11 +28,14 @@ public class FragmentControl extends Fragment {
     private ToggleButton tbtnWorkMode;
     private SeekBar sbTempThreshold, sbSmokeThreshold, sbPm25Threshold;
     private TextView tvTempThresholdValue, tvSmokeThresholdValue, tvPm25ThresholdValue;
+    private TextView tvCurrentTempThreshold, tvCurrentSmokeThreshold, tvCurrentPm25Threshold;
     private EditText etTempThreshold, etSmokeThreshold, etPm25Threshold;
     private Button btnTempThreshold, btnSmokeThreshold, btnPm25Threshold;
     private SeekBar sbSteeringAngle;
     private TextView tvSteeringAngleValue;
     private Button btnSteeringAngle;
+    private com.google.android.material.button.MaterialButton btnSteeringPreset0, btnSteeringPreset45,
+            btnSteeringPreset90, btnSteeringPreset135, btnSteeringPreset180;
 
     @Nullable
     @Override
@@ -57,9 +60,18 @@ public class FragmentControl extends Fragment {
         btnSmokeThreshold = view.findViewById(R.id.btnSmokeThreshold);
         etPm25Threshold = view.findViewById(R.id.etPm25Threshold);
         btnPm25Threshold = view.findViewById(R.id.btnPm25Threshold);
+        tvCurrentTempThreshold = view.findViewById(R.id.tvCurrentTempThreshold);
+        tvCurrentSmokeThreshold = view.findViewById(R.id.tvCurrentSmokeThreshold);
+        tvCurrentPm25Threshold = view.findViewById(R.id.tvCurrentPm25Threshold);
         sbSteeringAngle = view.findViewById(R.id.sbSteeringAngle);
         tvSteeringAngleValue = view.findViewById(R.id.tvSteeringAngleValue);
         btnSteeringAngle = view.findViewById(R.id.btnSteeringAngle);
+
+        btnSteeringPreset0 = view.findViewById(R.id.btnSteeringPreset0);
+        btnSteeringPreset45 = view.findViewById(R.id.btnSteeringPreset45);
+        btnSteeringPreset90 = view.findViewById(R.id.btnSteeringPreset90);
+        btnSteeringPreset135 = view.findViewById(R.id.btnSteeringPreset135);
+        btnSteeringPreset180 = view.findViewById(R.id.btnSteeringPreset180);
 
         view.findViewById(R.id.btnLogout).setOnClickListener(v -> {
             getActivity().getSharedPreferences("auth_prefs", 0)
@@ -100,7 +112,7 @@ public class FragmentControl extends Fragment {
         sbTempThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                tvTempThresholdValue.setText((progress + 10) + "°C");
+                tvTempThresholdValue.setText(progress + "°C");
             }
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
@@ -108,7 +120,7 @@ public class FragmentControl extends Fragment {
             }
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
-                int val = seekBar.getProgress() + 10;
+                int val = seekBar.getProgress();
                 getMain().temp_threshold = val;
                 getMain().controlDevice("temp_threshold", val);
                 Toast.makeText(getContext(), "温度阈值: " + val + "°C", Toast.LENGTH_SHORT).show();
@@ -187,6 +199,12 @@ public class FragmentControl extends Fragment {
             getMain().controlDevice("steeringstatus", angle);
         });
 
+        btnSteeringPreset0.setOnClickListener(v -> applySteeringPreset(0));
+        btnSteeringPreset45.setOnClickListener(v -> applySteeringPreset(45));
+        btnSteeringPreset90.setOnClickListener(v -> applySteeringPreset(90));
+        btnSteeringPreset135.setOnClickListener(v -> applySteeringPreset(135));
+        btnSteeringPreset180.setOnClickListener(v -> applySteeringPreset(180));
+
         return view;
     }
 
@@ -199,11 +217,11 @@ public class FragmentControl extends Fragment {
         if (TextUtils.isEmpty(input)) { Toast.makeText(getContext(), "请输入温度阈值", Toast.LENGTH_SHORT).show(); return; }
         try {
             int value = Integer.parseInt(input);
-            if (value < 10 || value > 50) { Toast.makeText(getContext(), "范围 10-50°C", Toast.LENGTH_SHORT).show(); return; }
+            if (value < 0 || value > 100) { Toast.makeText(getContext(), "范围 0-100°C", Toast.LENGTH_SHORT).show(); return; }
             getMain().temp_threshold = value;
             getMain().isThresholdCommandPending = true;
             getMain().controlDevice("temp_threshold", value);
-            sbTempThreshold.setProgress(value - 10);
+            sbTempThreshold.setProgress(value);
             tvTempThresholdValue.setText(value + "°C");
             etTempThreshold.setText("");
             closeKeyboard();
@@ -252,12 +270,23 @@ public class FragmentControl extends Fragment {
         if (imm != null && focus != null) imm.hideSoftInputFromWindow(focus.getWindowToken(), 0);
     }
 
+    private void applySteeringPreset(int angle) {
+        sbSteeringAngle.setProgress(angle);
+        tvSteeringAngleValue.setText(angle + "°");
+        getMain().steering_angle = angle;
+        getMain().controlDevice("steeringstatus", angle);
+    }
+
     public void refreshUI(boolean isOnline) {
-        if (btnLedOn == null) return;
+        if (btnLedOn == null || getActivity() == null) return;
 
         boolean led = getMain().led_state;
         btnLedOn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(led ? 0xFF4CAF50 : 0xFF9E9E9E));
         btnLedOff.setBackgroundTintList(android.content.res.ColorStateList.valueOf(led ? 0xFF9E9E9E : 0xFF4CAF50));
+
+        tvCurrentTempThreshold.setText(getMain().temp_threshold + "°C");
+        tvCurrentSmokeThreshold.setText(String.valueOf(getMain().smoke_threshold));
+        tvCurrentPm25Threshold.setText(getMain().pm25_threshold + " μg/m³");
 
         if (swBeep.isEnabled() && swBeep.isChecked() != getMain().beep_state) {
             swBeep.setChecked(getMain().beep_state);
@@ -267,7 +296,7 @@ public class FragmentControl extends Fragment {
         }
 
         if (!getMain().isThresholdCommandPending) {
-            sbTempThreshold.setProgress(getMain().temp_threshold - 10);
+            sbTempThreshold.setProgress(getMain().temp_threshold);
             tvTempThresholdValue.setText(getMain().temp_threshold + "°C");
         }
         if (!getMain().isSmokeThresholdPending) {

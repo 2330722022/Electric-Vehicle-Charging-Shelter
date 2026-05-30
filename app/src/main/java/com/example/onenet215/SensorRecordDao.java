@@ -12,6 +12,6 @@ public interface SensorRecordDao {
     @Insert
     long insert(SensorRecord record);
 
-    @Query("SELECT * FROM sensor_records ORDER BY timestamp DESC LIMIT 100")
+    @Query("SELECT * FROM sensor_records ORDER BY timestamp DESC LIMIT 500")
     List<SensorRecord> getRecentRecords();
 }

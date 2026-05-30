@@ -189,9 +189,10 @@ public class DataFetcher {
         pauseSensorPolling();
         
         new Thread(() -> {
+            HttpURLConnection connection = null;
             try {
                 URL url = new URL(CONTROL_API_URL);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection = (HttpURLConnection) url.openConnection();
                 
                 // 设置POST请求
                 connection.setRequestMethod("POST");
@@ -254,9 +255,7 @@ public class DataFetcher {
                         });
                     }
                 }
-                
-                connection.disconnect();
-                
+
             } catch (Exception e) {
                 Log.e(TAG, "发送控制指令异常", e);
                 if (callback != null) {
@@ -265,12 +264,14 @@ public class DataFetcher {
                     });
                 }
             } finally {
-                // 恢复传感器轮询
+                if (connection != null) {
+                    connection.disconnect();
+                }
                 mainHandler.postDelayed(this::resumeSensorPolling, 2000);
             }
         }).start();
     }
-    
+
     /**
      * 本地直连模式发送控制指令
      * 通过 HTTP GET 向单片机的网关 IP 发送控制指令
@@ -280,12 +281,13 @@ public class DataFetcher {
         pauseSensorPolling();
         
         new Thread(() -> {
+            HttpURLConnection connection = null;
             try {
                 String urlStr = "http://" + gatewayIp + "/api/set?type=" + type + "&val=" + val;
                 Log.d(TAG, "本地直连发送指令: " + urlStr);
                 
                 URL url = new URL(urlStr);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod("GET");
                 connection.setConnectTimeout(CONNECT_TIMEOUT);
                 connection.setReadTimeout(READ_TIMEOUT);
@@ -317,9 +319,7 @@ public class DataFetcher {
                         });
                     }
                 }
-                
-                connection.disconnect();
-                
+
             } catch (Exception e) {
                 Log.e(TAG, "本地直连指令发送异常", e);
                 if (callback != null) {
@@ -328,6 +328,9 @@ public class DataFetcher {
                     });
                 }
             } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
                 mainHandler.postDelayed(this::resumeSensorPolling, 2000);
             }
         }).start();
@@ -357,9 +360,10 @@ public class DataFetcher {
         
         Log.d(TAG, "Task_Sensor: 开始获取传感器数据...");
         new Thread(() -> {
+            HttpURLConnection connection = null;
             try {
                 URL url = new URL(QUERY_API_URL);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection = (HttpURLConnection) url.openConnection();
                 
                 // 设置请求方法和超时时间
                 connection.setRequestMethod("GET");
@@ -433,9 +437,7 @@ public class DataFetcher {
                         });
                     }
                 }
-                
-                connection.disconnect();
-                
+
             } catch (java.net.SocketTimeoutException e) {
                 Log.w(TAG, "Task_Sensor: HTTP请求超时", e);
                 hasDataDelay = true;
@@ -453,6 +455,10 @@ public class DataFetcher {
                         callback.onDataDelay(true);
                         callback.onError("网络异常: " + e.getMessage());
                     });
+                }
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
                 }
             }
         }).start();

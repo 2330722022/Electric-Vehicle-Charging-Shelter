@@ -1,17 +1,29 @@
 package com.example.onenet215;
 
+import android.Manifest;
+import android.app.AlertDialog;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.StrictMode;
+import android.provider.Settings;
 import android.util.Log;
+import android.view.View;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.fragment.app.Fragment;
 import androidx.viewpager2.widget.ViewPager2;
 
@@ -24,36 +36,36 @@ import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity
         implements FragmentAiAssistant.SensorSnapshotProvider {
 
     private static final String TAG = "MainActivity";
+    private static final String CHANNEL_ID = "fire_alarm_channel";
+    private static final int ALARM_NOTIFICATION_ID = 1001;
 
     private DataFetcher dataFetcher;
-    private MqttManager mqttManager;
 
     String humidity_value, light_value, temperature_value;
     String pm2_5_value, mq2_value, flame_value, vibration_value;
     String tilt_angle_value = "--";
-    int alarm_state = 0;
+    volatile int alarm_state = 0;
+    volatile int lastNotifiedAlarmState = 0;
     String alarm_type = "";
-    boolean led_state = false;
-    boolean beep_state = false;
-    boolean fan_state = false;
-    String fan_status = "--";
-    boolean work_mode_auto = true;
-    int temp_threshold = 25;
-    int smoke_threshold = 1500;
-    int pm25_threshold = 200;
-    int steering_angle = 90;
-    boolean isDeviceOnline = false;
-    long lastDataReceiveTime = 0;
+    volatile boolean led_state = false;
+    volatile boolean beep_state = false;
+    volatile boolean fan_state = false;
+    volatile String fan_status = "--";
+    volatile boolean work_mode_auto = true;
+    volatile int temp_threshold = 25;
+    volatile int smoke_threshold = 1500;
+    volatile int pm25_threshold = 200;
+    volatile int steering_angle = 90;
+    volatile boolean isDeviceOnline = false;
+    volatile long lastDataReceiveTime = 0;
     boolean isThresholdCommandPending = false;
     boolean isSmokeThresholdPending = false;
     boolean isPm25ThresholdPending = false;
@@ -65,8 +77,8 @@ public class MainActivity extends AppCompatActivity
 
     private long lastRoomWriteTime = 0;
     private int lastWrittenAlarmState = -1;
-    private final Executor roomWriteExecutor = Executors.newSingleThreadExecutor();
-    private static final long ROOM_WRITE_INTERVAL_MS = 60_000;
+    private final java.util.concurrent.ExecutorService roomWriteExecutor = Executors.newSingleThreadExecutor();
+    private static final long ROOM_WRITE_INTERVAL_MS = 15_000;
 
     Handler timeoutHandler = new Handler(Looper.getMainLooper());
     Runnable thresholdTimeoutRunnable = null;
@@ -95,6 +107,9 @@ public class MainActivity extends AppCompatActivity
 
         setContentView(R.layout.activity_main);
 
+        createNotificationChannel();
+        checkAndRequestNotificationPermission();
+
         if (android.os.Build.VERSION.SDK_INT > 9) {
             StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().permitAll().build();
             StrictMode.setThreadPolicy(policy);
@@ -120,7 +135,6 @@ public class MainActivity extends AppCompatActivity
         initViewPager();
         initBottomNav();
 
-        initMqttManager();
         initDataFetcher();
     }
 
@@ -144,6 +158,16 @@ public class MainActivity extends AppCompatActivity
         viewPager = findViewById(R.id.viewPager);
         viewPager.setAdapter(new FragmentAdapter(this, fragmentList));
         viewPager.setUserInputEnabled(true);
+
+        viewPager.setPageTransformer(new ViewPager2.PageTransformer() {
+            @Override
+            public void transformPage(@NonNull View page, float position) {
+                float absPos = Math.abs(position);
+                page.setAlpha(1f - 0.25f * absPos);
+                page.setScaleX(0.95f + 0.05f * (1f - absPos));
+                page.setScaleY(0.95f + 0.05f * (1f - absPos));
+            }
+        });
 
         viewPager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
             @Override
@@ -172,14 +196,17 @@ public class MainActivity extends AppCompatActivity
 
     private void notifyAllFragments() {
         runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
             fragmentSensor.updateSensorData(temperature_value, humidity_value, light_value,
                     pm2_5_value, mq2_value, flame_value);
             fragmentSensor.updateAlarmState(alarm_state, temp_threshold, pm25_threshold);
+            fragmentSensor.setWorkMode(work_mode_auto);
             fragmentSensor.refreshUI(isDeviceOnline);
 
             fragmentControl.refreshUI(isDeviceOnline);
 
-            fragmentStatus.updateStatusData(fan_status, String.valueOf(steering_angle));
+            String fanStatusText = (!fan_status.equals("--") && !fan_status.isEmpty()) ? fan_status : (fan_state ? "运行中" : "已停止");
+            fragmentStatus.updateStatusData(fanStatusText, String.valueOf(steering_angle));
             fragmentStatus.updateAlarmState(alarm_state, temp_threshold, pm25_threshold);
             fragmentStatus.updateConnectionStatus(isDeviceOnline);
             fragmentStatus.refreshUI(isDeviceOnline);
@@ -208,10 +235,6 @@ public class MainActivity extends AppCompatActivity
         Toast.makeText(this, "正在重新连接...", Toast.LENGTH_SHORT).show();
         consecutiveFailures = 0;
         isDeviceOnline = false;
-
-        if (mqttManager != null) {
-            mqttManager.manualReconnect();
-        }
 
         if (dataFetcher != null) {
             dataFetcher.startPolling();
@@ -249,7 +272,7 @@ public class MainActivity extends AppCompatActivity
         snapshot.flame = flame_value != null ? flame_value : "--";
         snapshot.vibration = vibration_value != null ? vibration_value : "--";
         snapshot.tiltAngle = tilt_angle_value;
-        snapshot.fanStatus = fan_status;
+        snapshot.fanStatus = (!fan_status.equals("--") && !fan_status.isEmpty()) ? fan_status : (fan_state ? "运行中" : "已停止");
         snapshot.alarmState = alarm_state;
         snapshot.ledOn = led_state;
         snapshot.beepOn = beep_state;
@@ -257,70 +280,6 @@ public class MainActivity extends AppCompatActivity
         snapshot.isOnline = isDeviceOnline;
         snapshot.timestamp = lastDataReceiveTime;
         return snapshot;
-    }
-
-    private void initMqttManager() {
-        mqttManager = new MqttManager(this);
-
-        mqttManager.setOnMessageReceivedListener((topic, payload) -> {
-            Log.d(TAG, "[MQTT] 收到消息: Topic=" + topic + ", Payload=" + payload);
-            try {
-                processIncomingJson(new JSONObject(payload), "MQTT");
-            } catch (JSONException e) {
-                Log.e(TAG, "[MQTT] 解析消息失败", e);
-            }
-        });
-
-        mqttManager.setOnConnectionStatusChangeListener(connected -> {
-            Log.d(TAG, "MQTT连接状态: " + (connected ? "已连接" : "已断开"));
-            if (connected) {
-                isDeviceOnline = true;
-                consecutiveFailures = 0;
-                lastDataReceiveTime = System.currentTimeMillis();
-                if (dataFetcher != null && !dataFetcher.isPolling()) {
-                    dataFetcher.startPolling();
-                }
-            }
-            notifyAllFragments();
-        });
-
-        mqttManager.connect();
-        Log.d(TAG, "MqttManager初始化完成");
-    }
-
-    private void processIncomingJson(JSONObject mqttJson, String source) throws JSONException {
-        JSONArray dataArray = null;
-
-        if (mqttJson.has("data")) {
-            dataArray = mqttJson.optJSONArray("data");
-        } else if (mqttJson.has("params")) {
-            JSONObject params = mqttJson.optJSONObject("params");
-            if (params != null) {
-                dataArray = new JSONArray();
-                Iterator<String> keys = params.keys();
-                while (keys.hasNext()) {
-                    String key = keys.next();
-                    JSONObject item = new JSONObject();
-                    item.put("identifier", key);
-                    item.put("value", params.get(key));
-                    dataArray.put(item);
-                }
-            }
-        } else {
-            dataArray = new JSONArray();
-            Iterator<String> keys = mqttJson.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                JSONObject item = new JSONObject();
-                item.put("identifier", key);
-                item.put("value", mqttJson.get(key));
-                dataArray.put(item);
-            }
-        }
-
-        if (dataArray != null) {
-            DealJsonDataFromMqtt(dataArray, source);
-        }
     }
 
     private void initDataFetcher() {
@@ -335,7 +294,7 @@ public class MainActivity extends AppCompatActivity
                 lastDataReceiveTime = System.currentTimeMillis();
                 try {
                     JSONArray parsedData = DataFetcher.parseResponse(data);
-                    DealJsonDataFromMqtt(parsedData, "HTTP");
+                    parseDeviceData(parsedData, "HTTP");
                 } catch (JSONException e) {
                     Log.e(TAG, "[HTTP] 解析数据失败", e);
                 }
@@ -386,7 +345,7 @@ public class MainActivity extends AppCompatActivity
             Log.d(TAG, "[缓存] 加载缓存数据: " + cachedData.toString());
             try {
                 JSONArray parsedData = DataFetcher.parseResponse(cachedData);
-                DealJsonDataFromMqtt(parsedData, "缓存");
+                parseDeviceData(parsedData, "缓存");
             } catch (JSONException e) {
                 Log.e(TAG, "[缓存] 解析缓存数据失败", e);
             }
@@ -395,7 +354,7 @@ public class MainActivity extends AppCompatActivity
         Log.d(TAG, "DataFetcher初始化完成");
     }
 
-    private void DealJsonDataFromMqtt(JSONArray data, String dataSource) throws JSONException {
+    private void parseDeviceData(JSONArray data, String dataSource) throws JSONException {
         boolean hasNewData = false;
         int envDataCount = 0, statusDataCount = 0;
 
@@ -435,19 +394,25 @@ public class MainActivity extends AppCompatActivity
             } else if (identifier.equals("beep")) {
                 beep_state = val.equals("1") || val.equalsIgnoreCase("true"); hasNewData = true; statusDataCount++;
             } else if (identifier.equals("fan_en") || identifier.equals("fan")) {
-                fan_state = val.equals("1") || val.equalsIgnoreCase("true"); hasNewData = true; statusDataCount++;
+                boolean fanOn = val.equals("1") || val.equalsIgnoreCase("true");
+                fan_state = fanOn;
+                fan_status = fanOn ? "运行中" : "已停止"; hasNewData = true; statusDataCount++;
             } else if (identifier.equals("fan_status")) {
-                fan_status = val.equals("1") ? "运行中" : "已停止"; hasNewData = true; statusDataCount++;
+                fan_status = (val.equals("1") || val.equalsIgnoreCase("true")) ? "运行中" : "已停止"; hasNewData = true; statusDataCount++;
             } else if (identifier.equals("work_mode")) {
                 work_mode_auto = val.equals("1") || val.equalsIgnoreCase("true") || val.equals("auto");
                 hasNewData = true; statusDataCount++;
             } else if (identifier.equals("relay")) {
+                if (val != null && !val.isEmpty()) {
+                    boolean relayOn = val.equals("1") || val.equalsIgnoreCase("true");
+                    fan_state = relayOn;
+                    fan_status = relayOn ? "运行中" : "已停止";
+                }
                 hasNewData = true; statusDataCount++;
             } else if (identifier.equals("temp_threshold")) {
                 try {
                     temp_threshold = (int) Float.parseFloat(val);
-                    if (temp_threshold < 10) temp_threshold = 10;
-                    if (temp_threshold > 50) temp_threshold = 50;
+                    if (temp_threshold < 0) temp_threshold = 0;
                     hasNewData = true; statusDataCount++;
                     isThresholdCommandPending = false;
                     if (thresholdTimeoutRunnable != null) {
@@ -482,6 +447,8 @@ public class MainActivity extends AppCompatActivity
                 Log.w(TAG, "[" + dataSource + "] 警告: 未收到环境数据");
             }
             notifyAllFragments();
+
+            checkAndSendAlarmNotification();
 
             writeSensorRecordToRoom();
         }
@@ -534,17 +501,14 @@ public class MainActivity extends AppCompatActivity
         else if (property.equals("pm25_threshold")) pm25_threshold = (Integer) value;
         else if (property.equals("steeringstatus")) steering_angle = (Integer) value;
 
-        fragmentControl.refreshUI(isDeviceOnline);
+        notifyAllFragments();
 
         if (property.equals("steeringstatus") && gatewayIp != null && !gatewayIp.isEmpty()) {
             dataFetcher.sendLocalControlCommand(gatewayIp, property, (Integer) value);
             Log.d(TAG, "本地直连模式发送舵机指令: " + property + "=" + value);
-        } else if (mqttManager != null && mqttManager.isConnected()) {
-            mqttManager.publishCommand(property, value);
-            Log.d(TAG, "通过MQTT发送控制指令: " + property + "=" + value);
         } else if (dataFetcher != null) {
-            Log.w(TAG, "MQTT未连接，降级使用HTTP发送控制指令");
             dataFetcher.sendControlCommand(property, value);
+            Log.d(TAG, "通过HTTP发送控制指令: " + property + "=" + value);
         } else {
             Toast.makeText(this, "数据获取器未初始化", Toast.LENGTH_SHORT).show();
         }
@@ -553,10 +517,26 @@ public class MainActivity extends AppCompatActivity
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (mqttManager != null) mqttManager.disconnect();
         if (dataFetcher != null) dataFetcher.stopPolling();
-        if (timeoutHandler != null && thresholdTimeoutRunnable != null) {
-            timeoutHandler.removeCallbacks(thresholdTimeoutRunnable);
+        if (timeoutHandler != null) timeoutHandler.removeCallbacksAndMessages(null);
+        if (roomWriteExecutor != null) roomWriteExecutor.shutdownNow();
+    }
+
+    private void checkAndRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                new AlertDialog.Builder(this)
+                        .setTitle("开启通知权限")
+                        .setMessage("为了及时接收充电棚的消防告警通知，需要您开启通知权限。\n\n点击「去设置」→ 通知 → 开启")
+                        .setPositiveButton("去设置", (dialog, which) -> {
+                            Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                            intent.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                            startActivity(intent);
+                        })
+                        .setNegativeButton("稍后再说", null)
+                        .setCancelable(false)
+                        .show();
+            }
         }
     }
 
@@ -571,6 +551,74 @@ public class MainActivity extends AppCompatActivity
 
     public String getGatewayIp() {
         return gatewayIp;
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "消防告警",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            channel.setDescription("充电棚消防网关告警通知");
+            channel.enableVibration(true);
+            channel.enableLights(true);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) manager.createNotificationChannel(channel);
+        }
+    }
+
+    private void checkAndSendAlarmNotification() {
+        if (alarm_state == 0) {
+            lastNotifiedAlarmState = 0;
+            return;
+        }
+        if (alarm_state == lastNotifiedAlarmState) return;
+        lastNotifiedAlarmState = alarm_state;
+
+        String title, body;
+        switch (alarm_state) {
+            case 1:
+                title = "⚠️ 温度报警";
+                body = "充电棚温度超过阈值 (" + temp_threshold + "°C)，请及时检查！";
+                break;
+            case 2:
+                title = "🔥 烟雾/火焰报警";
+                body = "充电棚检测到烟雾或火焰，请立即处理！";
+                break;
+            case 3:
+                title = "🌫️ PM2.5超标";
+                body = "充电棚PM2.5超过阈值 (" + pm25_threshold + "μg/m³)";
+                break;
+            case 4:
+                title = "📳 振动告警";
+                body = "充电棚检测到异常振动，请检查设备安全！";
+                break;
+            case 5:
+                title = "🚨 火警触发！";
+                body = "检测到火情，请立即疏散并检查充电棚！";
+                break;
+            default:
+                title = "⚠️ 设备告警";
+                body = "充电棚发生未知告警，请检查设备状态";
+                break;
+        }
+
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_circle_red)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .setCategory(NotificationCompat.CATEGORY_ALARM);
+
+        NotificationManagerCompat.from(this).notify(ALARM_NOTIFICATION_ID, builder.build());
     }
 
     private static class FragmentAdapter extends androidx.viewpager2.adapter.FragmentStateAdapter {

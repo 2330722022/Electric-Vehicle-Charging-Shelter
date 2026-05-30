@@ -11,11 +11,10 @@ activity = "1.8.2"
 constraintlayout = "2.1.4"
 cardview = "1.0.0"
 viewpager2 = "1.0.0"
-mqtt-client = "1.2.5"
-mqtt-android-service = "1.1.1"
 okhttp = "4.12.0"
 room = "2.6.1"
 mpandroidchart = "3.1.0"
+swiperefreshlayout = "1.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
@@ -34,12 +33,11 @@ cardview = { group = "androidx.cardview", name = "cardview", version.ref = "card
 viewpager2 = { group = "androidx.viewpager2", name = "viewpager2", version.ref = "viewpager2" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso-core" }
 ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junit-version" }
-mqtt-client = { group = "org.eclipse.paho", name = "org.eclipse.paho.client.mqttv3", version.ref = "mqtt-client" }
-mqtt-android-service = { group = "org.eclipse.paho", name = "org.eclipse.paho.android.service", version.ref = "mqtt-android-service" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 mpandroidchart = { group = "com.github.PhilJay", name = "MPAndroidChart", version.ref = "mpandroidchart" }
+swiperefreshlayout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swiperefreshlayout" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

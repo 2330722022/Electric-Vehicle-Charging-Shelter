@@ -4,13 +4,18 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#F0F0F5"
-    android:fitsSystemWindows="true">
+    android:background="#F0F0F5">
+
+    <!-- 摄像头挖孔安全区域填充 -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="16dp"
+        android:background="@drawable/bg_top_bar_gradient" />
 
     <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingTop="12dp"
+        android:paddingTop="8dp"
         android:paddingBottom="12dp"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
@@ -50,7 +55,7 @@
             android:layout_centerVertical="true" />
     </RelativeLayout>
 
-    <ScrollView
+    <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
@@ -108,7 +113,7 @@
                 android:id="@+id/rvHistoryRecords"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:nestedScrollingEnabled="false" />
+                android:nestedScrollingEnabled="true" />
         </LinearLayout>
-    </ScrollView>
+    </androidx.core.widget.NestedScrollView>
 </LinearLayout>

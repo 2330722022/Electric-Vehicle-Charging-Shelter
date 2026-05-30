@@ -9,9 +9,11 @@ import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.Animation;
+import android.view.animation.ScaleAnimation;
 import android.widget.Button;
 import android.widget.ImageView;
-import android.widget.LinearLayout; 
+import android.widget.LinearLayout;
 
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -20,7 +22,17 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.cardview.widget.CardView;
 import androidx.fragment.app.Fragment;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
+import com.github.mikephil.charting.charts.LineChart;
+import com.github.mikephil.charting.components.XAxis;
+import com.github.mikephil.charting.data.Entry;
+import com.github.mikephil.charting.data.LineData;
+import com.github.mikephil.charting.data.LineDataSet;
+import com.github.mikephil.charting.formatter.ValueFormatter;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 public class FragmentSensor extends Fragment {
@@ -90,10 +102,24 @@ public class FragmentSensor extends Fragment {
     private CardView cardAlarm, cardWeather;
     private ImageView ivAlarmIndicator;
     private TextView tvHistoryEntry;
+    private TextView tvWorkModeLabel;
+
+    private SwipeRefreshLayout swipeRefreshSensor;
+    private LineChart sensorTrendChart;
+    private final List<Entry> tempHistory = new ArrayList<>();
+    private int trendIndex = 0;
 
     private String humidity_value, light_value, temperature_value;
     private String pm2_5_value, mq2_value, flame_value;
     private int alarm_state;
+    private boolean workModeAuto = true;
+
+    private String lastTempValue = "";
+    private String lastHumidityValue = "";
+    private String lastLightValue = "";
+    private String lastPm25Value = "";
+    private String lastSmokeValue = "";
+    private String lastFlameValue = "";
 
     private WeatherApiClient weatherClient;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -110,6 +136,10 @@ public class FragmentSensor extends Fragment {
 
     public void setControlCallback(ControlCallback callback) {
         this.controlCallback = callback;
+    }
+
+    private MainActivity getMain() {
+        return (MainActivity) getActivity();
     }
 
     @Nullable
@@ -142,6 +172,21 @@ public class FragmentSensor extends Fragment {
         cardWeather = view.findViewById(R.id.cardWeather);
         ivAlarmIndicator = view.findViewById(R.id.ivAlarmIndicator);
         tvHistoryEntry = view.findViewById(R.id.tvHistoryEntry);
+
+        tvWorkModeLabel = view.findViewById(R.id.tvWorkModeLabel);
+
+        swipeRefreshSensor = view.findViewById(R.id.swipeRefreshSensor);
+        swipeRefreshSensor.setColorSchemeResources(
+                android.R.color.holo_blue_dark,
+                android.R.color.holo_red_dark,
+                android.R.color.holo_orange_dark);
+        swipeRefreshSensor.setOnRefreshListener(() -> {
+            getMain().requestRefresh();
+            swipeRefreshSensor.setRefreshing(false);
+        });
+
+        sensorTrendChart = view.findViewById(R.id.sensorTrendChart);
+        initTrendChart();
 
         tvHistoryEntry.setOnClickListener(v -> {
             startActivity(new Intent(getActivity(), HistoryActivity.class));
@@ -270,6 +315,58 @@ public class FragmentSensor extends Fragment {
         this.flame_value = flame;
     }
 
+    public void setWorkMode(boolean auto) {
+        this.workModeAuto = auto;
+        if (tvWorkModeLabel != null) {
+            tvWorkModeLabel.setText(auto ? "🤖 自动运行中" : "🔧 手动模式");
+            tvWorkModeLabel.setTextColor(auto ? 0xFF4CAF50 : 0xFFFF9800);
+        }
+    }
+
+    private void initTrendChart() {
+        sensorTrendChart.getDescription().setEnabled(false);
+        sensorTrendChart.setTouchEnabled(false);
+        sensorTrendChart.setDragEnabled(false);
+        sensorTrendChart.setScaleEnabled(false);
+        sensorTrendChart.setPinchZoom(false);
+        sensorTrendChart.getXAxis().setPosition(XAxis.XAxisPosition.BOTTOM);
+        sensorTrendChart.getXAxis().setDrawGridLines(false);
+        sensorTrendChart.getXAxis().setDrawLabels(false);
+        sensorTrendChart.getAxisLeft().setDrawGridLines(true);
+        sensorTrendChart.getAxisLeft().setGridColor(0xFFEEEEEE);
+        sensorTrendChart.getAxisLeft().setTextColor(0xFF9E9E9E);
+        sensorTrendChart.getAxisLeft().setTextSize(9f);
+        sensorTrendChart.getAxisRight().setEnabled(false);
+        sensorTrendChart.getLegend().setEnabled(false);
+        sensorTrendChart.setData(new LineData());
+    }
+
+    private void updateTrendChart(String tempStr) {
+        try {
+            float temp = Float.parseFloat(tempStr);
+            tempHistory.add(new Entry(trendIndex++, temp));
+            if (tempHistory.size() > 20) tempHistory.remove(0);
+
+            LineDataSet set = new LineDataSet(tempHistory, "温度");
+            set.setColor(0xFFE53935);
+            set.setCircleColor(0xFFE53935);
+            set.setCircleRadius(2f);
+            set.setLineWidth(2f);
+            set.setMode(LineDataSet.Mode.CUBIC_BEZIER);
+            set.setDrawValues(false);
+            set.setDrawFilled(true);
+            set.setFillDrawable(new android.graphics.drawable.GradientDrawable(
+                    android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[]{0x33E53935, 0x00E53935}));
+
+            sensorTrendChart.setData(new LineData(set));
+            sensorTrendChart.notifyDataSetChanged();
+            sensorTrendChart.setVisibleXRangeMaximum(10);
+            sensorTrendChart.moveViewToX(trendIndex - 1);
+            sensorTrendChart.invalidate();
+        } catch (NumberFormatException ignored) {}
+    }
+
     public void updateAlarmState(int state, int tempThreshold, int pm25Threshold) {
         this.alarm_state = state;
 
@@ -336,14 +433,45 @@ public class FragmentSensor extends Fragment {
         }
     }
 
-    public void refreshUI(boolean isOnline) {
-        if (tvTemperature == null) return;
+    private void animateValueChange(TextView tv, String newVal, String oldVal) {
+        if (tv == null) return;
+        if (newVal != null && !newVal.equals(oldVal) && !tv.getText().toString().equals(newVal)) {
+            ScaleAnimation anim = new ScaleAnimation(1.2f, 1f, 1.2f, 1f,
+                    Animation.RELATIVE_TO_SELF, 0.5f,
+                    Animation.RELATIVE_TO_SELF, 0.5f);
+            anim.setDuration(300);
+            tv.startAnimation(anim);
+        }
+    }
 
+    public void refreshUI(boolean isOnline) {
+        if (tvTemperature == null || getActivity() == null) return;
+
+        animateValueChange(tvTemperature, temperature_value, lastTempValue);
+        lastTempValue = temperature_value;
         tvTemperature.setText(temperature_value != null ? temperature_value : "--");
+        if (temperature_value != null && sensorTrendChart != null) {
+            updateTrendChart(temperature_value);
+        }
+
+        animateValueChange(tvHumidity, humidity_value, lastHumidityValue);
+        lastHumidityValue = humidity_value;
         tvHumidity.setText(humidity_value != null ? humidity_value : "--");
+
+        animateValueChange(tvLight, light_value, lastLightValue);
+        lastLightValue = light_value;
         tvLight.setText(light_value != null ? light_value : "--");
+
+        animateValueChange(tvPm25, pm2_5_value, lastPm25Value);
+        lastPm25Value = pm2_5_value;
         tvPm25.setText(pm2_5_value != null ? pm2_5_value : "--");
+
+        animateValueChange(tvSmoke, mq2_value, lastSmokeValue);
+        lastSmokeValue = mq2_value;
         tvSmoke.setText(mq2_value != null ? mq2_value : "--");
+
+        animateValueChange(tvFlame, flame_value, lastFlameValue);
+        lastFlameValue = flame_value;
         tvFlame.setText(flame_value != null ? flame_value : "--");
 
         if (isOnline) {

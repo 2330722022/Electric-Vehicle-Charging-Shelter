@@ -4,10 +4,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#F0F0F5"
-    android:fitsSystemWindows="true">
+    android:background="#F0F0F5">
 
-    <!-- 顶部标题栏 - paddingTop只留8dp呼吸空间，根布局负责状态栏避让 -->
+    <!-- 摄像头挖孔安全区域填充，与标题栏同色渐变无缝衔接 -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="16dp"
+        android:background="@drawable/bg_top_bar_gradient" />
+
+    <!-- 顶部标题栏 -->
     <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="64dp"
@@ -70,7 +75,6 @@
 
     </RelativeLayout>
 
-    <!-- ViewPager2 滑动页面 -->
     <androidx.viewpager2.widget.ViewPager2
         android:id="@+id/viewPager"
         android:layout_width="match_parent"

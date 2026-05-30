@@ -204,6 +204,123 @@
                 android:orientation="vertical"
                 android:padding="16dp">
 
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="📊 当前阈值状态"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="#37474F"
+                    android:layout_marginBottom="12dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="10dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="🌡️ 温度阈值"
+                        android:textSize="13sp"
+                        android:textColor="#757575" />
+
+                    <TextView
+                        android:id="@+id/tvCurrentTempThreshold"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="25°C"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="#E53935" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#F0F0F0"
+                    android:layout_marginBottom="10dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="10dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="💨 烟雾阈值"
+                        android:textSize="13sp"
+                        android:textColor="#757575" />
+
+                    <TextView
+                        android:id="@+id/tvCurrentSmokeThreshold"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="1500"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="#795548" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="#F0F0F0"
+                    android:layout_marginBottom="10dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="🌫️ PM2.5阈值"
+                        android:textSize="13sp"
+                        android:textColor="#757575" />
+
+                    <TextView
+                        android:id="@+id/tvCurrentPm25Threshold"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="200 μg/m³"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="#7B1FA2" />
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </androidx.cardview.widget.CardView>
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="14dp"
+            android:layout_marginEnd="14dp"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="2dp"
+            app:cardBackgroundColor="#FFFFFF"
+        android:outlineAmbientShadowColor="#1A000000"
+        android:outlineSpotShadowColor="#0D000000">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -220,7 +337,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:text="温度阈值 (10-50°C)"
+                            android:text="温度阈值 (0-100°C)"
                             android:textSize="13sp"
                             android:textColor="#E53935"
                             android:textStyle="bold" />
@@ -239,8 +356,8 @@
                         android:id="@+id/sbTempThreshold"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:max="40"
-                        android:progress="15"
+                        android:max="100"
+                        android:progress="25"
                         android:layout_marginTop="8dp"
                         android:paddingStart="0dp"
                         android:paddingEnd="0dp" />
@@ -257,10 +374,12 @@
                             android:layout_width="0dp"
                             android:layout_height="42dp"
                             android:layout_weight="1"
-                            android:hint="输入 10-50"
+                            android:hint="输入 0-100"
+                            android:textColor="#212121"
+                            android:textColorHint="#9E9E9E"
                             android:inputType="number"
                             android:textSize="13sp"
-                            android:maxLength="2"
+                            android:maxLength="3"
                             android:paddingStart="12dp"
                             android:paddingEnd="12dp"
                             android:background="@drawable/bg_edit_text" />
@@ -341,6 +460,8 @@
                             android:layout_height="42dp"
                             android:layout_weight="1"
                             android:hint="输入 0-4000"
+                            android:textColor="#212121"
+                            android:textColorHint="#9E9E9E"
                             android:inputType="number"
                             android:textSize="13sp"
                             android:maxLength="4"
@@ -423,6 +544,8 @@
                             android:layout_height="42dp"
                             android:layout_weight="1"
                             android:hint="输入 0-500"
+                            android:textColor="#212121"
+                            android:textColorHint="#9E9E9E"
                             android:inputType="number"
                             android:textSize="13sp"
                             android:maxLength="3"
@@ -513,6 +636,82 @@
                     android:layout_marginTop="8dp"
                     android:paddingStart="0dp"
                     android:paddingEnd="0dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center"
+                    android:layout_marginTop="10dp">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSteeringPreset0"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="0°"
+                        android:textSize="12sp"
+                        android:textColor="#1565C0"
+                        android:layout_marginEnd="4dp"
+                        app:strokeColor="#1565C0"
+                        app:strokeWidth="1dp"
+                        app:cornerRadius="6dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSteeringPreset45"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="45°"
+                        android:textSize="12sp"
+                        android:textColor="#1565C0"
+                        android:layout_marginEnd="4dp"
+                        app:strokeColor="#1565C0"
+                        app:strokeWidth="1dp"
+                        app:cornerRadius="6dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSteeringPreset90"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="90°"
+                        android:textSize="12sp"
+                        android:textColor="#FFFFFF"
+                        android:layout_marginEnd="4dp"
+                        app:backgroundTint="#1565C0"
+                        app:cornerRadius="6dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSteeringPreset135"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="135°"
+                        android:textSize="12sp"
+                        android:textColor="#1565C0"
+                        android:layout_marginEnd="4dp"
+                        app:strokeColor="#1565C0"
+                        app:strokeWidth="1dp"
+                        app:cornerRadius="6dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSteeringPreset180"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="0dp"
+                        android:layout_height="36dp"
+                        android:layout_weight="1"
+                        android:text="180°"
+                        android:textSize="12sp"
+                        android:textColor="#1565C0"
+                        app:strokeColor="#1565C0"
+                        app:strokeWidth="1dp"
+                        app:cornerRadius="6dp" />
+                </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="match_parent"

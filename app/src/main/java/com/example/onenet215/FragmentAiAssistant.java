@@ -37,9 +37,12 @@ public class FragmentAiAssistant extends Fragment {
     private Button btnChatSend;
     private EditText etChatInput;
     private Button btnLowerThreshold;
+    private com.google.android.material.button.MaterialButton btnModeToggle;
     private TextView tvAiStatus;
+    private TextView tvModeHint;
     private TextView tvWeatherAlert;
     private LinearLayout llWeatherAlert;
+    private boolean isProfessionalMode = true;
 
     private DeepSeekApiClient deepSeekClient;
     private WeatherApiClient weatherClient;
@@ -76,6 +79,8 @@ public class FragmentAiAssistant extends Fragment {
         btnChatSend = view.findViewById(R.id.btnChatSend);
         etChatInput = view.findViewById(R.id.etChatInput);
         btnLowerThreshold = view.findViewById(R.id.btnLowerThreshold);
+        btnModeToggle = view.findViewById(R.id.btnModeToggle);
+        tvModeHint = view.findViewById(R.id.tvModeHint);
         tvAiStatus = view.findViewById(R.id.tvAiStatus);
         tvWeatherAlert = view.findViewById(R.id.tvWeatherAlert);
         llWeatherAlert = view.findViewById(R.id.llWeatherAlert);
@@ -104,6 +109,15 @@ public class FragmentAiAssistant extends Fragment {
             }
         });
 
+        btnModeToggle.setOnClickListener(v -> {
+            isProfessionalMode = !isProfessionalMode;
+            updateModeUI();
+            String modeMsg = isProfessionalMode
+                    ? "🔄 已切换至专业模式，仅回答消防安全相关问题"
+                    : "🔄 已切换至普通模式，可自由对话各类话题";
+            addSystemMessage(modeMsg);
+        });
+
         addWelcomeMessage();
 
         fetchWeather();
@@ -130,10 +144,11 @@ public class FragmentAiAssistant extends Fragment {
         tvAiStatus.setTextColor(0xFFFF9800);
         addTypingIndicator();
 
-        deepSeekClient.chat(input, new DeepSeekApiClient.DiagnoseCallback() {
+        deepSeekClient.chatWithMode(input, isProfessionalMode, new DeepSeekApiClient.DiagnoseCallback() {
             @Override
             public void onSuccess(String reply) {
                 mainHandler.post(() -> {
+                    if (!isAdded()) return;
                     removeTypingIndicator();
                     addAiBubble(reply);
                     btnChatSend.setEnabled(true);
@@ -145,6 +160,7 @@ public class FragmentAiAssistant extends Fragment {
             @Override
             public void onError(String error) {
                 mainHandler.post(() -> {
+                    if (!isAdded()) return;
                     removeTypingIndicator();
                     addSystemMessage("❌ " + error);
                     btnChatSend.setEnabled(true);
@@ -166,25 +182,44 @@ public class FragmentAiAssistant extends Fragment {
         Context ctx = getContext();
         if (ctx == null || llChatContainer == null) return;
 
+        LinearLayout wrapper = new LinearLayout(ctx);
+        wrapper.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams wrapParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        wrapParams.setMargins(0, dpToPx(4), dpToPx(40), dpToPx(4));
+        wrapper.setLayoutParams(wrapParams);
+        wrapper.setGravity(Gravity.START);
+
+        TextView avatar = new TextView(ctx);
+        avatar.setText("🤖");
+        avatar.setTextSize(16);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        avatarParams.gravity = Gravity.TOP;
+        avatarParams.setMargins(0, dpToPx(4), dpToPx(6), 0);
+        avatar.setLayoutParams(avatarParams);
+        wrapper.addView(avatar);
+
         TextView tv = new TextView(ctx);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.setMargins(0, dpToPx(5), dpToPx(48), dpToPx(5));
-        params.gravity = Gravity.START;
         tv.setLayoutParams(params);
         tv.setText(text);
         tv.setTextSize(13);
         tv.setTextColor(0xFF37474F);
         tv.setLineSpacing(dpToPx(3), 1f);
-        tv.setPadding(dpToPx(14), dpToPx(12), dpToPx(14), dpToPx(12));
+        tv.setPadding(dpToPx(14), dpToPx(10), dpToPx(14), dpToPx(10));
+        tv.setMaxWidth((int) (ctx.getResources().getDisplayMetrics().widthPixels * 0.72f));
 
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xFFFFFFFF);
-        bg.setCornerRadius(dpToPx(12));
+        float[] corners = new float[]{dpToPx(4), dpToPx(4), dpToPx(14), dpToPx(14), dpToPx(14), dpToPx(14), dpToPx(4), dpToPx(4)};
+        bg.setCornerRadii(corners);
         tv.setBackground(bg);
         tv.setElevation(dpToPx(2));
 
-        llChatContainer.addView(tv);
+        wrapper.addView(tv);
+        llChatContainer.addView(wrapper);
         scrollToBottom();
     }
 
@@ -192,25 +227,45 @@ public class FragmentAiAssistant extends Fragment {
         Context ctx = getContext();
         if (ctx == null || llChatContainer == null) return;
 
+        LinearLayout wrapper = new LinearLayout(ctx);
+        wrapper.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams wrapParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        wrapParams.setMargins(dpToPx(40), dpToPx(4), 0, dpToPx(4));
+        wrapper.setLayoutParams(wrapParams);
+        wrapper.setGravity(Gravity.END);
+
         TextView tv = new TextView(ctx);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.setMargins(dpToPx(48), dpToPx(5), 0, dpToPx(5));
-        params.gravity = Gravity.END;
         tv.setLayoutParams(params);
         tv.setText(text);
         tv.setTextSize(13);
-        tv.setTextColor(0xFF1565C0);
+        tv.setTextColor(0xFF0D47A1);
         tv.setLineSpacing(dpToPx(3), 1f);
-        tv.setPadding(dpToPx(14), dpToPx(12), dpToPx(14), dpToPx(12));
+        tv.setPadding(dpToPx(14), dpToPx(10), dpToPx(14), dpToPx(10));
+        tv.setMaxWidth((int) (ctx.getResources().getDisplayMetrics().widthPixels * 0.72f));
 
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xFFE3F2FD);
-        bg.setCornerRadius(dpToPx(12));
+        float[] corners = new float[]{dpToPx(14), dpToPx(14), dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(14), dpToPx(14)};
+        bg.setCornerRadii(corners);
         tv.setBackground(bg);
         tv.setElevation(dpToPx(2));
 
-        llChatContainer.addView(tv);
+        wrapper.addView(tv);
+
+        TextView avatar = new TextView(ctx);
+        avatar.setText("👤");
+        avatar.setTextSize(16);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        avatarParams.gravity = Gravity.TOP;
+        avatarParams.setMargins(dpToPx(6), dpToPx(4), 0, 0);
+        avatar.setLayoutParams(avatarParams);
+        wrapper.addView(avatar);
+
+        llChatContainer.addView(wrapper);
         scrollToBottom();
     }
 
@@ -309,6 +364,7 @@ public class FragmentAiAssistant extends Fragment {
             @Override
             public void onSuccess(String reply) {
                 mainHandler.post(() -> {
+                    if (!isAdded()) return;
                     removeTypingIndicator();
                     addAiBubble("🛡️ " + reply);
                     btnAiDiagnose.setEnabled(true);
@@ -321,6 +377,7 @@ public class FragmentAiAssistant extends Fragment {
             @Override
             public void onError(String error) {
                 mainHandler.post(() -> {
+                    if (!isAdded()) return;
                     removeTypingIndicator();
                     addSystemMessage("❌ " + error);
                     btnAiDiagnose.setEnabled(true);
@@ -337,7 +394,10 @@ public class FragmentAiAssistant extends Fragment {
         weatherClient.fetchWeather(22.5431, 114.0579, new WeatherApiClient.WeatherCallback() {
             @Override
             public void onSuccess(WeatherInfo info) {
-                mainHandler.post(() -> handleWeatherUpdate(info));
+                mainHandler.post(() -> {
+                    if (!isAdded()) return;
+                    handleWeatherUpdate(info);
+                });
             }
 
             @Override
@@ -361,6 +421,21 @@ public class FragmentAiAssistant extends Fragment {
                     + "，超过35°C安全线。建议将网关硬件温度告警阈值调低至 45°C，以防电池热失控误报。";
             tvWeatherAlert.setText(alertText);
             llWeatherAlert.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void updateModeUI() {
+        if (btnModeToggle == null || tvModeHint == null) return;
+        if (isProfessionalMode) {
+            btnModeToggle.setText("专业模式 🔒");
+            btnModeToggle.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF1A237E));
+            btnModeToggle.setTextColor(0xFFFFFFFF);
+            tvModeHint.setText("当前仅回答消防相关问题");
+        } else {
+            btnModeToggle.setText("普通模式 🌐");
+            btnModeToggle.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFFE3F2FD));
+            btnModeToggle.setTextColor(0xFF0D47A1);
+            tvModeHint.setText("可自由对话各类话题");
         }
     }
 

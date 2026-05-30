@@ -13,6 +13,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.cardview.widget.CardView;
 import androidx.fragment.app.Fragment;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 public class FragmentStatus extends Fragment {
 
@@ -22,6 +23,7 @@ public class FragmentStatus extends Fragment {
     private CardView cardAlarm;
     private ImageView ivAlarmIndicator;
     private Button btnRefresh;
+    private SwipeRefreshLayout swipeRefreshStatus;
 
     private String fan_status, steering_angle_value;
     private int alarm_state;
@@ -41,6 +43,16 @@ public class FragmentStatus extends Fragment {
         cardAlarm = view.findViewById(R.id.cardAlarm);
         ivAlarmIndicator = view.findViewById(R.id.ivAlarmIndicator);
         btnRefresh = view.findViewById(R.id.btnRefresh);
+
+        swipeRefreshStatus = view.findViewById(R.id.swipeRefreshStatus);
+        swipeRefreshStatus.setColorSchemeResources(
+                android.R.color.holo_blue_dark,
+                android.R.color.holo_red_dark,
+                android.R.color.holo_orange_dark);
+        swipeRefreshStatus.setOnRefreshListener(() -> {
+            getMain().requestRefresh();
+            swipeRefreshStatus.setRefreshing(false);
+        });
 
         btnRefresh.setOnClickListener(v -> {
             Toast.makeText(getContext(), "正在获取最新数据", Toast.LENGTH_SHORT).show();
@@ -138,18 +150,37 @@ public class FragmentStatus extends Fragment {
     }
 
     public void refreshUI(boolean isOnline) {
-        if (tvFanStatus == null) return;
+        if (tvFanStatus == null || getActivity() == null) return;
 
         tvFanStatus.setText(fan_status != null && !fan_status.isEmpty() ? fan_status : "--");
-        tvSteeringAngle.setText(steering_angle_value != null ? steering_angle_value : "--");
+        if (tvSteeringAngle != null) tvSteeringAngle.setText(steering_angle_value != null ? steering_angle_value : "--");
 
         if (isOnline) {
-            tvFanStatus.setTextColor(0xFF00897B);
-            tvSteeringAngle.setTextColor(0xFF1565C0);
+            if ("运行中".equals(fan_status)) {
+                tvFanStatus.clearAnimation();
+                tvFanStatus.setAlpha(1f);
+                tvFanStatus.setTextColor(0xFF00897B);
+                android.view.animation.AlphaAnimation pulseAnim = new android.view.animation.AlphaAnimation(1f, 0.5f);
+                pulseAnim.setDuration(800);
+                pulseAnim.setRepeatMode(android.view.animation.Animation.REVERSE);
+                pulseAnim.setRepeatCount(android.view.animation.Animation.INFINITE);
+                tvFanStatus.startAnimation(pulseAnim);
+            } else if ("已停止".equals(fan_status)) {
+                tvFanStatus.clearAnimation();
+                tvFanStatus.setAlpha(1f);
+                tvFanStatus.setTextColor(0xFF757575);
+            } else {
+                tvFanStatus.clearAnimation();
+                tvFanStatus.setAlpha(1f);
+                tvFanStatus.setTextColor(0xFF00897B);
+            }
+            if (tvSteeringAngle != null) tvSteeringAngle.setTextColor(0xFF1565C0);
         } else {
+            tvFanStatus.clearAnimation();
+            tvFanStatus.setAlpha(1f);
             int gray = 0xFFBDBDBD;
             tvFanStatus.setTextColor(gray);
-            tvSteeringAngle.setTextColor(gray);
+            if (tvSteeringAngle != null) tvSteeringAngle.setTextColor(gray);
         }
     }
 }
