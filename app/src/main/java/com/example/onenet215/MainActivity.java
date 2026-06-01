@@ -321,7 +321,7 @@ public class MainActivity extends AppCompatActivity
                 runOnUiThread(() -> {
                     String message;
                     if (property.equals("temp_threshold")) message = "温度阈值: " + value + "°C";
-                    else if (property.equals("smoke_threshold")) message = "烟雾阈值: " + value;
+                    else if (property.equals("mq2_threshold")) message = "烟雾阈值: " + value;
                     else if (property.equals("pm25_threshold")) message = "PM2.5阈值: " + value + "μg/m³";
                     else if (property.equals("fan_en") || property.equals("fan")) message = "风扇" + (value.equals(true) ? " 开启" : " 关闭") + " 成功";
                     else if (property.equals("beep")) message = "蜂鸣器" + (value.equals(true) ? " 开启" : " 关闭") + " 成功";
@@ -497,7 +497,7 @@ public class MainActivity extends AppCompatActivity
         else if (property.equals("fan_en") || property.equals("fan")) fan_state = (Boolean) value;
         else if (property.equals("work_mode")) work_mode_auto = (Boolean) value;
         else if (property.equals("temp_threshold")) temp_threshold = (Integer) value;
-        else if (property.equals("smoke_threshold")) smoke_threshold = (Integer) value;
+        else if (property.equals("mq2_threshold")) smoke_threshold = (Integer) value;
         else if (property.equals("pm25_threshold")) pm25_threshold = (Integer) value;
         else if (property.equals("steeringstatus")) steering_angle = (Integer) value;
 

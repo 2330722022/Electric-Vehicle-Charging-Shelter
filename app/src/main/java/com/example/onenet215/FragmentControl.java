@@ -140,7 +140,7 @@ public class FragmentControl extends Fragment {
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 getMain().smoke_threshold = seekBar.getProgress();
-                getMain().controlDevice("smoke_threshold", getMain().smoke_threshold);
+                getMain().controlDevice("mq2_threshold", getMain().smoke_threshold);
                 Toast.makeText(getContext(), "烟雾阈值: " + getMain().smoke_threshold, Toast.LENGTH_SHORT).show();
             }
         });
@@ -237,7 +237,7 @@ public class FragmentControl extends Fragment {
             if (value < 0 || value > 4000) { Toast.makeText(getContext(), "范围 0-4000", Toast.LENGTH_SHORT).show(); return; }
             getMain().smoke_threshold = value;
             getMain().isSmokeThresholdPending = true;
-            getMain().controlDevice("smoke_threshold", value);
+            getMain().controlDevice("mq2_threshold", value);
             sbSmokeThreshold.setProgress(value);
             tvSmokeThresholdValue.setText(String.valueOf(value));
             etSmokeThreshold.setText("");
